@@ -33,8 +33,9 @@ acceptance criteria for the active milestone — do not work outside that scope.
 
 ## Run / test
 
-Stubs only at this stage; backend and frontend have no runnable app yet. Commands will be added
-here once each subtree has a build.
+- Backend: `cd backend && uv run python -m app.google.auth` once to authorize, then
+  `uv run uvicorn app.main:app --reload --port 8010`.
+- Frontend: `cd frontend && npm install && npm run dev` (serves on `http://localhost:5173`).
 
 ## Hard constraints
 

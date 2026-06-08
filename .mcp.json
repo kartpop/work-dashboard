@@ -5,7 +5,7 @@
       "args": ["workspace-mcp", "--tool-tier", "core"],
       "env": {
         "OAUTHLIB_INSECURE_TRANSPORT": "1",
-        "GOOGLE_CLIENT_SECRET_PATH": "/Users/kartikeya/Documents/src/personal/work-dashboard/client_secret.json"
+        "GOOGLE_CLIENT_SECRET_PATH": "./client_secret.json"
       }
     }
   }

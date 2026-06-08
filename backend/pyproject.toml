@@ -1,0 +1,19 @@
+[project]
+name = "work-dashboard-backend"
+version = "0.1.0"
+description = "FastAPI backend for the personal work dashboard"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "google-auth>=2.35",
+    "google-auth-oauthlib>=1.2",
+    "google-api-python-client>=2.140",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
