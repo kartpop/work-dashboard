@@ -1,0 +1,30 @@
+# Secrets / local-only Claude config
+.claude/settings.local.json
+CLAUDE.local.md
+
+# OAuth tokens / credentials
+*.token.json
+token.json
+credentials.json
+client_secret*.json
+.google-tokens/
+
+# Env files
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+build/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
