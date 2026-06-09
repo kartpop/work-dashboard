@@ -25,3 +25,29 @@ export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
   }
   return (await response.json()) as T;
 }
+
+export async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const err = (await response.json().catch(() => null)) as
+      | { error?: { message?: string } }
+      | null;
+    throw new Error(err?.error?.message ?? `${path} failed with status ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+export async function apiDelete<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, { method: "DELETE" });
+  if (!response.ok) {
+    const err = (await response.json().catch(() => null)) as
+      | { error?: { message?: string } }
+      | null;
+    throw new Error(err?.error?.message ?? `${path} failed with status ${response.status}`);
+  }
+  return (await response.json()) as T;
+}

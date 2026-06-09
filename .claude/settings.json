@@ -4,10 +4,29 @@
       "Bash(pkill -f \"vite\")",
       "Bash(npm run *)",
       "Bash(node -e ' *)",
-      "Bash(pkill -f \"vite\" 2>/dev/null; sleep 1 *)"
+      "Bash(pkill -f \"vite\" 2>/dev/null; sleep 1 *)",
+      "Bash(grep -E \"\\\\.\\(tsx|ts|css|scss\\)$\")",
+      "Bash(cat > *)",
+      "Bash(mkdir -p /Users/kartikeya/Documents/src/personal/work-dashboard/.claude/agents /Users/kartikeya/Documents/src/personal/work-dashboard/.claude/hooks)"
     ],
     "additionalDirectories": [
-      "/private/tmp"
+      "/private/tmp",
+      "/tmp",
+      "/Users/kartikeya/Documents/src/personal/work-dashboard/.claude"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/format.sh",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

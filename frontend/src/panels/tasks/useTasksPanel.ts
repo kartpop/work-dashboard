@@ -1,25 +1,37 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiGet, apiPatch } from "../../api";
+import { apiDelete, apiGet, apiPatch, apiPost } from "../../api";
 
 export interface Task {
+  type: "task";
   id: string;
   title: string;
   status: string;
   due: string | null;
   notes: string | null;
   rank: number | null;
-  priority: number | null;
+  group_id: number | null;
 }
 
-export interface DateGroup {
+export interface Group {
+  type: "group";
+  id: number;
+  name: string;
+  rank: number | null;
+  items: Task[];
+}
+
+export type BucketItem = Task | Group;
+
+export interface Bucket {
   label: string;
-  tasks: Task[];
+  key: string;
+  items: BucketItem[];
 }
 
 export interface TaskList {
   id: string;
   title: string;
-  groups: DateGroup[];
+  buckets: Bucket[];
 }
 
 interface TasksResponse {
@@ -31,6 +43,31 @@ interface TasksPanelState {
   isLoading: boolean;
   error: string | null;
 }
+
+// ── Pure helpers for optimistic state transforms ──────────────────────────────
+
+function updateBucket(
+  state: TasksPanelState,
+  tasklistId: string,
+  bucketKey: string,
+  updater: (items: BucketItem[]) => BucketItem[],
+): TasksPanelState {
+  return {
+    ...state,
+    taskLists: state.taskLists.map((list) => {
+      if (list.id !== tasklistId) return list;
+      return {
+        ...list,
+        buckets: list.buckets.map((b) => {
+          if (b.key !== bucketKey) return b;
+          return { ...b, items: updater(b.items) };
+        }),
+      };
+    }),
+  };
+}
+
+// ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useTasksPanel() {
   const [state, setState] = useState<TasksPanelState>({
@@ -45,7 +82,11 @@ export function useTasksPanel() {
     apiGet<TasksResponse>("/tasks?view=grouped")
       .then((data) => {
         if (!cancelled)
-          setState({ taskLists: data.task_lists, isLoading: false, error: null });
+          setState({
+            taskLists: data.task_lists,
+            isLoading: false,
+            error: null,
+          });
       })
       .catch((err: Error) => {
         if (!cancelled)
@@ -58,43 +99,214 @@ export function useTasksPanel() {
 
   useEffect(load, [load]);
 
-  const setPriority = useCallback(
-    async (tasklistId: string, taskId: string, priority: number) => {
-      await apiPatch(`/tasks/${tasklistId}/${taskId}/overlay`, { priority });
-      load();
-    },
-    [load],
-  );
-
-  // Applies an optimistic reorder in local state and persists a single rank write.
-  // newRank is computed by the component from its current group tasks.
+  // Reorder a task within its current container (same group or same standalone zone).
+  // Rank is pre-computed by the component.
   const reorderTask = useCallback(
     (
       tasklistId: string,
       taskId: string,
-      groupLabel: string,
+      bucketKey: string,
+      groupId: number | null,
       fromIndex: number,
       toIndex: number,
       newRank: number,
     ) => {
-      setState((prev) => {
-        const lists = prev.taskLists.map((list) => {
-          if (list.id !== tasklistId) return list;
-          const groups = list.groups.map((g) => {
-            if (g.label !== groupLabel) return g;
-            const tasks = [...g.tasks];
-            const [moved] = tasks.splice(fromIndex, 1);
-            tasks.splice(toIndex, 0, moved);
-            return { ...g, tasks };
-          });
-          return { ...list, groups };
-        });
-        return { ...prev, taskLists: lists };
-      });
-      apiPatch(`/tasks/${tasklistId}/${taskId}/overlay`, { rank: newRank }).catch(() => {});
+      setState((prev) =>
+        updateBucket(prev, tasklistId, bucketKey, (items) => {
+          if (groupId === null) {
+            // reorder at bucket level (standalone task moving among bucket items)
+            const idx = items.findIndex(
+              (it) => it.type === "task" && it.id === taskId,
+            );
+            if (idx === -1) return items;
+            const next = [...items];
+            const [moved] = next.splice(idx, 1);
+            next.splice(toIndex, 0, moved);
+            return next;
+          } else {
+            return items.map((item) => {
+              if (item.type !== "group" || item.id !== groupId) return item;
+              const tasks = [...item.items];
+              const [moved] = tasks.splice(fromIndex, 1);
+              tasks.splice(toIndex, 0, moved);
+              return { ...item, items: tasks };
+            });
+          }
+        }),
+      );
+      apiPatch(`/tasks/${tasklistId}/${taskId}/overlay`, {
+        rank: newRank,
+      }).catch(() => {});
     },
     [],
   );
 
-  return { ...state, setPriority, reorderTask };
+  // Move a task between containers (standalone ↔ group, or group → different group).
+  const moveTask = useCallback(
+    (
+      tasklistId: string,
+      taskId: string,
+      bucketKey: string,
+      destGroupId: number | null,
+      destIndex: number,
+      newRank: number,
+    ) => {
+      setState((prev) =>
+        updateBucket(prev, tasklistId, bucketKey, (items) => {
+          // find and extract the task
+          let task: Task | null = null;
+          const withoutTask = items
+            .map((item) => {
+              if (item.type === "task" && item.id === taskId) {
+                task = { ...item, group_id: destGroupId, rank: newRank };
+                return null;
+              }
+              if (item.type === "group") {
+                const idx = item.items.findIndex((t) => t.id === taskId);
+                if (idx !== -1) {
+                  task = {
+                    ...item.items[idx],
+                    group_id: destGroupId,
+                    rank: newRank,
+                  };
+                  const remaining = item.items.filter((t) => t.id !== taskId);
+                  return remaining.length > 0
+                    ? { ...item, items: remaining }
+                    : null;
+                }
+              }
+              return item;
+            })
+            .filter((it): it is BucketItem => it !== null);
+
+          if (!task) return items;
+
+          if (destGroupId === null) {
+            // insert as standalone at destIndex in the bucket items
+            const result = [...withoutTask];
+            result.splice(destIndex, 0, task);
+            return result;
+          } else {
+            // insert into the target group
+            return withoutTask.map((item) => {
+              if (item.type !== "group" || item.id !== destGroupId) return item;
+              const tasks = [...item.items];
+              tasks.splice(destIndex, 0, task!);
+              return { ...item, items: tasks };
+            });
+          }
+        }),
+      );
+      const patch: Record<string, unknown> = {
+        rank: newRank,
+        group_id: destGroupId,
+      };
+      apiPatch(`/tasks/${tasklistId}/${taskId}/overlay`, patch).catch(() => {});
+    },
+    [],
+  );
+
+  // Reorder a group among bucket-level items.
+  const reorderGroup = useCallback(
+    (
+      tasklistId: string,
+      groupId: number,
+      bucketKey: string,
+      fromIndex: number,
+      toIndex: number,
+      newRank: number,
+    ) => {
+      setState((prev) =>
+        updateBucket(prev, tasklistId, bucketKey, (items) => {
+          const next = [...items];
+          const [moved] = next.splice(fromIndex, 1);
+          next.splice(toIndex, 0, moved);
+          return next;
+        }),
+      );
+      apiPatch(`/tasks/${tasklistId}/groups/${groupId}`, {
+        rank: newRank,
+      }).catch(() => {});
+    },
+    [],
+  );
+
+  // Create a group; insert from POST response so no reload is needed.
+  const createGroup = useCallback(
+    async (
+      tasklistId: string,
+      bucketKey: string,
+      name: string,
+      rank?: number,
+    ) => {
+      const data = await apiPost<{
+        id: number;
+        name: string;
+        rank: number | null;
+      }>(`/tasks/${tasklistId}/groups`, { name, bucket_key: bucketKey, rank });
+      const grp: Group = {
+        type: "group",
+        id: data.id,
+        name: data.name,
+        rank: data.rank,
+        items: [],
+      };
+      setState((prev) =>
+        updateBucket(prev, tasklistId, bucketKey, (items) => [...items, grp]),
+      );
+      return grp;
+    },
+    [],
+  );
+
+  // Rename a group (optimistic).
+  const renameGroup = useCallback(
+    (tasklistId: string, groupId: number, bucketKey: string, name: string) => {
+      setState((prev) =>
+        updateBucket(prev, tasklistId, bucketKey, (items) =>
+          items.map((item) =>
+            item.type === "group" && item.id === groupId
+              ? { ...item, name }
+              : item,
+          ),
+        ),
+      );
+      apiPatch(`/tasks/${tasklistId}/groups/${groupId}`, { name }).catch(
+        () => {},
+      );
+    },
+    [],
+  );
+
+  // Delete a group; member tasks become standalone (optimistic).
+  const deleteGroup = useCallback(
+    (tasklistId: string, groupId: number, bucketKey: string) => {
+      setState((prev) =>
+        updateBucket(prev, tasklistId, bucketKey, (items) => {
+          const result: BucketItem[] = [];
+          for (const item of items) {
+            if (item.type === "group" && item.id === groupId) {
+              // ungrouped tasks go to standalone
+              result.push(...item.items.map((t) => ({ ...t, group_id: null })));
+            } else {
+              result.push(item);
+            }
+          }
+          return result;
+        }),
+      );
+      apiDelete(`/tasks/${tasklistId}/groups/${groupId}`).catch(() => {});
+    },
+    [],
+  );
+
+  return {
+    ...state,
+    reorderTask,
+    moveTask,
+    reorderGroup,
+    createGroup,
+    renameGroup,
+    deleteGroup,
+  };
 }

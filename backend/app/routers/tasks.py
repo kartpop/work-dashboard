@@ -2,6 +2,7 @@ from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
 from app.db import get_session
@@ -31,7 +32,7 @@ async def list_tasks(
 
 class OverlayUpdate(BaseModel):
     rank: Optional[float] = None
-    priority: Optional[int] = None
+    group_id: Optional[int] = None  # None = ungroup when explicitly in body
 
 
 @router.patch("/tasks/{tasklist_id}/{task_id}/overlay")
@@ -41,13 +42,85 @@ async def update_overlay(
     body: OverlayUpdate,
     session: Session = Depends(get_session),
 ):
-    if body.rank is None and body.priority is None:
-        raise ApiError(400, "no_fields", "Provide at least one of rank or priority.")
+    group_id_provided = "group_id" in body.model_fields_set
+    if body.rank is None and not group_id_provided:
+        raise ApiError(400, "no_fields", "Provide at least one of rank or group_id.")
     row = overlay_svc.upsert_overlay(
         session,
         tasklist_id=tasklist_id,
         task_id=task_id,
         rank=body.rank,
-        priority=body.priority,
+        group_id=body.group_id if group_id_provided else overlay_svc._UNSET,
     )
-    return {"tasklist_id": row.tasklist_id, "task_id": row.task_id, "rank": row.rank, "priority": row.priority}
+    return {"tasklist_id": row.tasklist_id, "task_id": row.task_id, "rank": row.rank, "group_id": row.group_id}
+
+
+# ── Group CRUD ────────────────────────────────────────────────────────────────
+
+class GroupCreate(BaseModel):
+    name: str
+    bucket_key: str
+    rank: Optional[float] = None
+
+
+class GroupUpdate(BaseModel):
+    name: Optional[str] = None
+    rank: Optional[float] = None
+
+
+def _group_response(grp) -> dict:
+    return {
+        "id": grp.id,
+        "tasklist_id": grp.tasklist_id,
+        "bucket_key": grp.bucket_key,
+        "name": grp.name,
+        "rank": grp.rank,
+    }
+
+
+@router.post("/tasks/{tasklist_id}/groups", status_code=201)
+async def create_group(
+    tasklist_id: str,
+    body: GroupCreate,
+    session: Session = Depends(get_session),
+):
+    try:
+        grp = overlay_svc.create_group(
+            session,
+            tasklist_id=tasklist_id,
+            bucket_key=body.bucket_key,
+            name=body.name,
+            rank=body.rank,
+        )
+    except IntegrityError:
+        raise ApiError(409, "group_exists", "A group with that name already exists in this bucket.")
+    return _group_response(grp)
+
+
+@router.patch("/tasks/{tasklist_id}/groups/{group_id}")
+async def update_group(
+    tasklist_id: str,
+    group_id: int,
+    body: GroupUpdate,
+    session: Session = Depends(get_session),
+):
+    if body.name is None and body.rank is None:
+        raise ApiError(400, "no_fields", "Provide at least one of name or rank.")
+    grp = overlay_svc.update_group(
+        session, group_id=group_id, tasklist_id=tasklist_id, name=body.name, rank=body.rank
+    )
+    if grp is None:
+        raise ApiError(404, "not_found", "Group not found.")
+    return _group_response(grp)
+
+
+@router.delete("/tasks/{tasklist_id}/groups/{group_id}")
+async def delete_group(
+    tasklist_id: str,
+    group_id: int,
+    session: Session = Depends(get_session),
+):
+    ok = overlay_svc.delete_group(session, group_id=group_id, tasklist_id=tasklist_id)
+    if not ok:
+        raise ApiError(404, "not_found", "Group not found.")
+    return {"ok": True}

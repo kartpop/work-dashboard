@@ -14,3 +14,10 @@ paths: ["frontend/**"]
   utilities. Cross-cutting helpers with no panel-specific knowledge (the backend fetch
   wrapper `api.ts`, `formatDate.ts`) live at `frontend/src/` root and may be imported by any
   panel hook.
+- **Optimistic drag/group convention (goal 3+):** All drag and group mutations are optimistic.
+  The component computes the new rank from its current local state (midpoint of neighbours)
+  and passes it to the hook. The hook applies the state update inside `setState`, then fires
+  `apiPatch`/`apiPost`/`apiDelete` *outside* `setState` without awaiting. Never do a full
+  reload (`load()`) after a drag op. A single drag always produces exactly one PATCH
+  (rank ± group_id). For the DnD implementation details, known rough edges, and bug history
+  see `.claude/rules/tasks-panel.md` (auto-loads when editing `frontend/src/panels/tasks/**`).

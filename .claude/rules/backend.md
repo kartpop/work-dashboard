@@ -18,6 +18,12 @@ paths: ["backend/**"]
 - Merge, sort, and group logic lives exclusively in `backend/app/overlay/service.py`. Routers
   call `overlay_svc.get_merged_task_lists(...)` and stay thin. Do not put merge/sort logic in
   routers or in `app/google/*`.
+- **API shape (goal 3+):** `GET /tasks?view=grouped` returns `task_lists[].buckets[].items[]`.
+  Key is `buckets` (not `groups`). Each item has `type: "task"` or `type: "group"` (groups embed
+  their `items`). No `priority` field. Bucket key is `YYYY-MM-DD` (IST) or the sentinel `NO_DATE`.
+- **Overlay service owns group CRUD** (`create_group`, `update_group`, `delete_group`). Group
+  scope = `(tasklist_id, bucket_key)`. Task `group_id` is nullable; pass `group_id=None` to
+  `upsert_overlay` to explicitly ungroup.
 - The overlay persistence layer (`backend/app/overlay/`) uses SQLModel + Alembic. Run
   `alembic upgrade head` from `backend/` before starting the server. The `overlay.db` SQLite
   file lives in `backend/` and is gitignored.

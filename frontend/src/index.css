@@ -183,47 +183,149 @@ h1, h2, h3 {
   cursor: grabbing;
 }
 
-.priority-badge {
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 700;
-  padding: 1px 5px;
-  border-radius: 4px;
-  border: 1px solid transparent;
-  cursor: pointer;
-  min-width: 26px;
-  text-align: center;
-  background: none;
-  color: var(--done);
-  border-color: var(--border);
-}
-
-.priority-badge:hover {
-  border-color: var(--done);
-}
-
-.priority-badge.priority-1 {
-  color: #3b82f6;
-  border-color: #3b82f620;
-  background: #3b82f610;
-}
-
-.priority-badge.priority-2 {
-  color: #f59e0b;
-  border-color: #f59e0b20;
-  background: #f59e0b10;
-}
-
-.priority-badge.priority-3 {
-  color: #ef4444;
-  border-color: #ef444420;
-  background: #ef444410;
-}
-
 .task-item .task-title {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ── Group container ───────────────────────────────────────────── */
+
+.group-item-wrapper {
+  display: block;
+  padding: 0;
+  border-bottom: none;
+}
+
+.group-item-wrapper:last-child {
+  border-bottom: none;
+}
+
+.group-container {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 4px 0;
+  background: var(--muted-bg);
+  overflow: hidden;
+}
+
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.group-drag-handle {
+  font-size: 13px;
+}
+
+.group-name {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-h);
+  cursor: text;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-name:hover {
+  color: var(--text);
+}
+
+.group-name-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-h);
+  outline: none;
+}
+
+.group-name-input:focus {
+  border-color: var(--done);
+}
+
+.group-delete {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--done);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.group-delete:hover {
+  color: var(--error);
+}
+
+.group-tasks {
+  padding: 0 0 0 8px;
+  min-height: 32px;
+}
+
+.task-item--compact {
+  padding-left: 4px;
+}
+
+/* ── Add-group affordance ─────────────────────────────────────── */
+
+.add-group-btn {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--done);
+  font-size: 11px;
+  text-align: left;
+  padding: 4px 2px;
+  cursor: pointer;
+  margin-top: 2px;
+}
+
+.add-group-btn:hover {
+  color: var(--text);
+}
+
+.add-group-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.add-group-confirm,
+.add-group-cancel {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.add-group-confirm:hover {
+  border-color: var(--done);
+}
+
+.add-group-cancel:hover {
+  color: var(--done);
 }
