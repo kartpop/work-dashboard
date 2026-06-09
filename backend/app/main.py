@@ -1,16 +1,26 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.db import create_tables
 from app.routers import calendar, tasks
 
-app = FastAPI(title="Work Dashboard API")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    create_tables()
+    yield
+
+
+app = FastAPI(title="Work Dashboard API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "PATCH"],
     allow_headers=["*"],
 )
 

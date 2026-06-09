@@ -34,6 +34,7 @@ acceptance criteria for the active milestone — do not work outside that scope.
 ## Run / test
 
 - Backend: `cd backend && uv run python -m app.google.auth` once to authorize, then
+  `uv run alembic upgrade head` once per schema change, then
   `uv run uvicorn app.main:app --reload --port 8010`.
 - Frontend: `cd frontend && npm install && npm run dev` (serves on `http://localhost:5173`).
 

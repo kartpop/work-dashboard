@@ -20,6 +20,7 @@ committed — ask whoever set up the Google Cloud project for a copy).
 cd backend
 uv sync
 uv run python -m app.google.auth        # one-time: opens a browser for Google OAuth consent
+uv run alembic upgrade head             # run once per schema change (creates overlay.db)
 uv run uvicorn app.main:app --reload --port 8010
 ```
 

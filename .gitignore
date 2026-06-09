@@ -19,6 +19,11 @@ __pycache__/
 .venv/
 venv/
 
+# SQLite overlay DB (local dev only; use Postgres in prod)
+backend/overlay.db
+backend/overlay.db-wal
+backend/overlay.db-shm
+
 # Node
 node_modules/
 dist/

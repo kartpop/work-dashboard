@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pkill -f \"vite\")",
+      "Bash(npm run *)",
+      "Bash(node -e ' *)",
+      "Bash(pkill -f \"vite\" 2>/dev/null; sleep 1 *)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp"
+    ]
+  }
+}

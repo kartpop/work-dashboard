@@ -9,6 +9,8 @@ dependencies = [
     "google-auth>=2.35",
     "google-auth-oauthlib>=1.2",
     "google-api-python-client>=2.140",
+    "sqlmodel>=0.0.22",
+    "alembic>=1.13",
 ]
 
 [build-system]
