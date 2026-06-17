@@ -96,6 +96,33 @@ curl -s -X POST http://localhost:8010/tasks/<LISTID>/<TASKID>/move \
 # Move to the current list → 400 same_list.
 ```
 
+### Content CRUD endpoints (goal 4a — Google content writes)
+
+Also exercised only against `zz-verifier-test` lists (`verifier-writes`). Shapes:
+
+```bash
+# Create a task (lands undated → NO_DATE, top of bucket). 201, returns the new task.
+curl -s -X POST http://localhost:8010/tasks/<LISTID> \
+  -H 'Content-Type: application/json' -d '{"title": "vt-new", "rank": 1000}' | jq .
+# Empty title → 400 empty_title.
+
+# Edit content — PATCH the bare task. Only the fields sent are written; status rides this path.
+curl -s -X PATCH http://localhost:8010/tasks/<LISTID>/<TASKID> \
+  -H 'Content-Type: application/json' -d '{"title": "renamed"}' | jq .
+curl -s -X PATCH http://localhost:8010/tasks/<LISTID>/<TASKID> \
+  -H 'Content-Type: application/json' -d '{"notes": "a note"}' | jq .
+curl -s -X PATCH http://localhost:8010/tasks/<LISTID>/<TASKID> \
+  -H 'Content-Type: application/json' -d '{"status": "completed"}' | jq .   # uncomplete: needsAction
+# Empty body → 400 no_fields; empty title → 400 empty_title; missing task → 404.
+
+# Delete a task (immediate on the backend; the ~5s defer/undo is frontend-only).
+curl -s -X DELETE http://localhost:8010/tasks/<LISTID>/<TASKID> | jq .
+
+# Rename a list (tasklists resource).
+curl -s -X PATCH http://localhost:8010/lists/<LISTID> \
+  -H 'Content-Type: application/json' -d '{"title": "zz-verifier-test-renamed"}' | jq .
+```
+
 ## Frontend surface (GUI)
 
 Drive with Playwright. The origin is `http://localhost:5173`.
@@ -123,11 +150,27 @@ Key selectors:
 - `.group-name` — clickable group name (click to rename)
 - `.add-group-btn` — "+ group" affordance per bucket
 - `.panel-error` — error message (present only on fetch failure)
-- `.task-menu` — the ⋯ per-task menu trigger (goal 4: move-to-list)
-- `.task-menu-popover` — the open menu popover
+- `.task-menu` — the ⋯ per-task menu trigger (move-to-list + delete)
+- `.task-menu-popover` — the open menu popover. **Goal 4a: it is portaled to `<body>`** (escapes
+  the group clip), so query it at the document root, NOT inside `.group-container`.
 - `.move-to-list-option` — each target-list option inside the popover
-- `.toast` — write-failure toast (`role="alert"`; goal 4 — appears only when a Google write fails
-  and local state has rolled back)
+- `.task-menu-delete` — the Delete action inside the ⋯ popover (goal 4a)
+- `.toast` — write-failure toast (`role="alert"`; appears only when a Google write fails and local
+  state has rolled back)
+
+### Goal-4a selectors (full CRUD / MVP)
+- `.panel-head` / `.panel-refresh` — panel header and the manual refresh (⟳) button
+- `.list-title` — clickable list header (click → `.list-title-input` to rename the list)
+- `.add-task-btn` — per-list "+ add task" affordance → `.add-task-input` + `.add-task-confirm`
+- `.task-row` — the horizontal row inside each `.task-item` (the `.task-item` is now a column)
+- `.task-check` — the per-task complete checkbox (on standalone AND grouped tasks)
+- `.task-title-input` — inline title editor (click `.task-title` to open)
+- `.notes-toggle` — the notes expand triangle (`--open` when expanded, `--has` when notes exist)
+- `.task-notes` — the notes textarea (placeholder "Add notes" when empty)
+- `.task-date` — the per-task `<input type="date">` due-date picker
+- `.toast.toast--action` (`role="status"`) + `.toast-undo` — the Undo toast (completion + delete)
+- Overdue bucket: a `.date-group` whose `.date-group-label` reads **"Overdue"** (bucket key
+  `OVERDUE`); it is render-only — never a drag target.
 
 **No `.priority-badge` selector** — priority was removed in goal 3.
 
@@ -144,6 +187,30 @@ mutations = []
 page.on("request", lambda r: mutations.append(r) if r.method in ("PATCH","POST","DELETE") else None)
 page.goto("http://localhost:5173")
 ```
+
+### Goal-4a UI-flow checks (behaviours endpoint checks can't see)
+
+Drive these with Playwright + a request listener (`mutations` above), against `zz-verifier-test`
+lists only. They assert *state-machine* properties, not just final state:
+
+- **Complete + Undo fires ZERO Google writes on undo.** Check `.task-check` on a task → it leaves
+  the active view, exactly one `PATCH …/{task}` with `{status:"completed"}` fires, and a
+  `.toast--action` appears. Click `.toast-undo` *within ~5s* → the task returns and exactly one
+  more `PATCH` with `{status:"needsAction"}` fires (the undo). Completing a group's last member
+  removes the group (and undo restores it).
+- **Deferred DELETE fires ONLY after the window.** `⋯` → `.task-menu-delete` → row vanishes +
+  `.toast--action`. Clicking `.toast-undo` quickly → **no `DELETE` request at all**. Letting the
+  toast expire (>5s) → exactly one `DELETE …/{task}` fires.
+- **Date-picker reaches a no-bucket date.** Set `.task-date` to a date weeks out (no existing
+  bucket) → one `reschedule` POST; after the silent refetch the task appears in a new date bucket.
+  Setting a past date → it lands in the **Overdue** bucket; clearing → `NO_DATE`.
+- **Overdue rollup** renders as a single top `.date-group` labelled "Overdue" (not scattered
+  past-date buckets).
+- **Refresh** (`.panel-refresh`) re-runs `GET /tasks` (observe the request) without a full reload.
+- **Move-menu optimistic destination** — after `.move-to-list-option`, the task appears in the
+  target list **immediately** (no ~2-3s gap), and the popover is **not clipped** for a task low in
+  a tall group. Menu clipping is a *visual* property → confirm by screenshot / manual review, not
+  only by request count.
 
 ## What to capture
 

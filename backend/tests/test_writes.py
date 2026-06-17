@@ -13,6 +13,7 @@ from sqlmodel import Session, SQLModel, create_engine
 from sqlalchemy.pool import StaticPool
 
 from app.db import get_session
+from app.google.tasks import _UNSET, _reshape_task
 from app.main import app
 from app.overlay.models import TaskGroup, TaskOverlay
 
@@ -59,6 +60,7 @@ class Recorder:
         self.insert_error: Exception | None = None
         self.delete_error: Exception | None = None
         self.update_error: Exception | None = None
+        self.content_error: Exception | None = None
 
     async def get_task(self, tasklist_id, task_id):
         self.calls.append(("get_task", tasklist_id, task_id))
@@ -73,12 +75,34 @@ class Recorder:
         self.calls.append(("insert_task", tasklist_id, body))
         if self.insert_error:
             raise self.insert_error
-        return self.insert_result
+        # Mirror the real wrapper: echo the body, then reshape to the stable shape
+        # (adds due / notes / parent keys) so create returns a full task.
+        return _reshape_task({**self.insert_result, **body})
 
     async def delete_task(self, tasklist_id, task_id):
         self.calls.append(("delete_task", tasklist_id, task_id))
         if self.delete_error:
             raise self.delete_error
+
+    async def update_task_content(
+        self, tasklist_id, task_id, title=_UNSET, notes=_UNSET, status=_UNSET
+    ):
+        body = {}
+        if title is not _UNSET:
+            body["title"] = title
+        if notes is not _UNSET:
+            body["notes"] = notes
+        if status is not _UNSET:
+            body["status"] = status
+        self.calls.append(("update_task_content", tasklist_id, task_id, body))
+        if self.content_error:
+            raise self.content_error
+        base = self.tasks.get((tasklist_id, task_id), {"id": task_id})
+        return {**base, **body}
+
+    async def update_tasklist(self, tasklist_id, title):
+        self.calls.append(("update_tasklist", tasklist_id, title))
+        return {"id": tasklist_id, "title": title}
 
     def names(self):
         return [c[0] for c in self.calls]
@@ -91,7 +115,20 @@ def google(monkeypatch):
     monkeypatch.setattr("app.google.tasks.update_due_date", rec.update_due_date)
     monkeypatch.setattr("app.google.tasks.insert_task", rec.insert_task)
     monkeypatch.setattr("app.google.tasks.delete_task", rec.delete_task)
+    monkeypatch.setattr("app.google.tasks.update_task_content", rec.update_task_content)
+    monkeypatch.setattr("app.google.tasks.update_tasklist", rec.update_tasklist)
     return rec
+
+
+def _seed_task(google, list_id="L1", task_id="T1", **fields):
+    google.tasks[(list_id, task_id)] = {
+        "id": task_id,
+        "title": "x",
+        "status": "needsAction",
+        "due": None,
+        "notes": None,
+        **fields,
+    }
 
 
 # ── reschedule ────────────────────────────────────────────────────────────────
@@ -320,3 +357,177 @@ def test_move_delete_fails_after_insert_502_no_migration(client, google, session
     session.expire_all()
     assert session.get(TaskOverlay, ("L1", "T1")) is not None
     assert session.get(TaskOverlay, ("L2", "NEW1")) is None
+
+
+# ── create ─────────────────────────────────────────────────────────────────────
+
+
+def test_create_task(client, google, session):
+    google.insert_result = {"id": "NEW1"}
+    resp = client.post("/tasks/L1", json={"title": "new task", "rank": 500.0})
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["id"] == "NEW1"
+    assert data["title"] == "new task"
+    assert data["status"] == "needsAction"
+    assert data["due"] is None
+    assert data["rank"] == 500.0 and data["group_id"] is None
+    # Exactly one insert, with no due (lands in NO_DATE).
+    inserts = [c for c in google.calls if c[0] == "insert_task"]
+    assert len(inserts) == 1 and "due" not in inserts[0][2]
+    # Overlay row seeded with the client rank.
+    row = session.get(TaskOverlay, ("L1", "NEW1"))
+    assert row is not None and row.rank == 500.0
+
+
+def test_create_task_empty_title_400(client, google, session):
+    resp = client.post("/tasks/L1", json={"title": "   "})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "empty_title"
+    assert "insert_task" not in google.names()
+
+
+# ── content edit (title / notes) ────────────────────────────────────────────────
+
+
+def test_edit_title_sends_only_title(client, google, session):
+    _seed_task(google)
+    resp = client.patch("/tasks/L1/T1", json={"title": "renamed"})
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "renamed"
+    # The patch body carried ONLY title — notes/status omitted, not nulled.
+    edits = [c for c in google.calls if c[0] == "update_task_content"]
+    assert edits == [("update_task_content", "L1", "T1", {"title": "renamed"})]
+
+
+def test_edit_notes_only(client, google, session):
+    _seed_task(google)
+    resp = client.patch("/tasks/L1/T1", json={"notes": "some notes"})
+    assert resp.status_code == 200
+    edits = [c for c in google.calls if c[0] == "update_task_content"]
+    assert edits == [("update_task_content", "L1", "T1", {"notes": "some notes"})]
+
+
+def test_edit_empty_title_400(client, google, session):
+    _seed_task(google)
+    resp = client.patch("/tasks/L1/T1", json={"title": ""})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "empty_title"
+    assert "update_task_content" not in google.names()
+
+
+def test_edit_no_fields_400(client, google, session):
+    _seed_task(google)
+    resp = client.patch("/tasks/L1/T1", json={})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "no_fields"
+
+
+def test_edit_missing_task_404(client, google, session):
+    resp = client.patch("/tasks/L1/missing", json={"title": "x"})
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "task_not_found"
+
+
+# ── complete / uncomplete (status rides the content patch) ──────────────────────
+
+
+def test_complete_task(client, google, session):
+    _seed_task(google)
+    resp = client.patch("/tasks/L1/T1", json={"status": "completed"})
+    assert resp.status_code == 200
+    edits = [c for c in google.calls if c[0] == "update_task_content"]
+    assert edits == [("update_task_content", "L1", "T1", {"status": "completed"})]
+
+
+def test_uncomplete_task(client, google, session):
+    _seed_task(google, status="completed")
+    resp = client.patch("/tasks/L1/T1", json={"status": "needsAction"})
+    assert resp.status_code == 200
+    edits = [c for c in google.calls if c[0] == "update_task_content"]
+    assert edits == [("update_task_content", "L1", "T1", {"status": "needsAction"})]
+
+
+# ── delete (user path: immediate Google delete + overlay row removal) ───────────
+
+
+def test_delete_task_removes_overlay(client, google, session):
+    _seed_task(google)
+    session.add(TaskOverlay(tasklist_id="L1", task_id="T1", rank=3.0, group_id=None))
+    session.commit()
+    resp = client.delete("/tasks/L1/T1")
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] is True
+    assert google.names().count("delete_task") == 1
+    session.expire_all()
+    assert session.get(TaskOverlay, ("L1", "T1")) is None
+
+
+def test_delete_missing_task_404(client, google, session):
+    # No task seeded → existence check fails before any Google delete.
+    resp = client.delete("/tasks/L1/missing")
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "task_not_found"
+    assert "delete_task" not in google.names()
+
+
+def test_delete_task_google_failure_502(client, google, session):
+    _seed_task(google)
+    session.add(TaskOverlay(tasklist_id="L1", task_id="T1", rank=3.0, group_id=None))
+    session.commit()
+    google.delete_error = RuntimeError("boom")
+    resp = client.delete("/tasks/L1/T1")
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "google_delete_failed"
+    # Overlay row preserved when the Google delete fails.
+    session.expire_all()
+    assert session.get(TaskOverlay, ("L1", "T1")) is not None
+
+
+# ── list rename (tasklists resource) ────────────────────────────────────────────
+
+
+def test_rename_list(client, google, session):
+    resp = client.patch("/lists/L1", json={"title": "Renamed List"})
+    assert resp.status_code == 200
+    assert resp.json() == {"id": "L1", "title": "Renamed List"}
+    assert google.calls == [("update_tasklist", "L1", "Renamed List")]
+
+
+def test_rename_list_empty_400(client, google, session):
+    resp = client.patch("/lists/L1", json={"title": "  "})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "empty_title"
+    assert "update_tasklist" not in google.names()
+
+
+# ── _get_task maps Google's "bad id" responses to None ──────────────────────────
+# Google returns 404 for some unknown task ids and 400 for others; both must map
+# to None so callers raise a clean enveloped 404 (regression: a 400 leaked a 500).
+
+
+@pytest.mark.parametrize("status", [400, 404])
+def test_get_task_maps_bad_id_to_none(monkeypatch, status):
+    from googleapiclient.errors import HttpError
+
+    import app.google.tasks as t
+
+    class _Resp:
+        def __init__(self, s):
+            self.status = s
+            self.reason = "err"
+
+    class _Exec:
+        def execute(self):
+            raise HttpError(_Resp(status), b'{"error": "bad id"}')
+
+    class _Tasks:
+        def get(self, **_kw):
+            return _Exec()
+
+    class _Svc:
+        def tasks(self):
+            return _Tasks()
+
+    monkeypatch.setattr(t, "_tasks_service", lambda: _Svc())
+    assert t._get_task("L1", "bad") is None

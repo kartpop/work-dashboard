@@ -17,6 +17,7 @@ from app.overlay.models import TaskGroup, TaskOverlay
 
 _IST = zoneinfo.ZoneInfo("Asia/Kolkata")
 _NO_DATE = "NO_DATE"
+_OVERDUE = "OVERDUE"  # synthetic render-only bucket; rolls up all past-due dates
 
 # Sentinel to distinguish "field not provided" from "explicitly None"
 _UNSET: Any = object()
@@ -95,7 +96,9 @@ def get_merged_task_lists(
 
         base = {k: v for k, v in task_list.items() if k != "tasks"}
         if view == "flat":
-            ranked = sorted([t for t in merged if t["rank"] is not None], key=lambda t: t["rank"])
+            ranked = sorted(
+                [t for t in merged if t["rank"] is not None], key=lambda t: t["rank"]
+            )
             unranked = [t for t in merged if t["rank"] is None]
             result.append({**base, "tasks": ranked + unranked})
         else:
@@ -105,7 +108,9 @@ def get_merged_task_lists(
     return result
 
 
-def _build_buckets(tasks: list[dict], list_groups: list[TaskGroup]) -> list[dict[str, Any]]:
+def _build_buckets(
+    tasks: list[dict], list_groups: list[TaskGroup]
+) -> list[dict[str, Any]]:
     """Bucket tasks by due date, arranging each bucket as ordered items."""
     groups_by_bucket: dict[str, list[TaskGroup]] = {}
     for grp in list_groups:
@@ -128,16 +133,37 @@ def _build_buckets(tasks: list[dict], list_groups: list[TaskGroup]) -> list[dict
 
     sorted_keys = sorted(bucket_sort, key=lambda k: bucket_sort[k])
 
+    # Past-due items roll up into a single synthetic "Overdue" bucket at the top
+    # rather than scattering across past-date buckets. Keys sort ascending by
+    # date, so overdue items accumulate oldest-first. The rollup is render-only:
+    # OVERDUE is not a real due-date, so it is never a drag/reschedule target —
+    # past dates are reached via the date-picker. Groups keep their real
+    # bucket_key, so group-scope / reschedule logic is unaffected.
+    today = _today_ist()
+    overdue_items: list[dict] = []
     result = []
     for bkey in sorted_keys:
-        items = _build_bucket_items(bucket_tasks.get(bkey, []), groups_by_bucket.get(bkey, []))
-        if items:
-            result.append({"label": _bucket_key_to_label(bkey), "key": bkey, "items": items})
+        items = _build_bucket_items(
+            bucket_tasks.get(bkey, []), groups_by_bucket.get(bkey, [])
+        )
+        if not items:
+            continue
+        if bkey != _NO_DATE and date.fromisoformat(bkey) < today:
+            overdue_items.extend(items)
+        else:
+            result.append(
+                {"label": _bucket_key_to_label(bkey), "key": bkey, "items": items}
+            )
+
+    if overdue_items:
+        result.insert(0, {"label": "Overdue", "key": _OVERDUE, "items": overdue_items})
 
     return result
 
 
-def _build_bucket_items(bucket_tasks: list[dict], groups: list[TaskGroup]) -> list[dict]:
+def _build_bucket_items(
+    bucket_tasks: list[dict], groups: list[TaskGroup]
+) -> list[dict]:
     """Build the ordered items list for a bucket (standalone tasks + groups)."""
     known_ids = {grp.id for grp in groups}
 
@@ -154,19 +180,27 @@ def _build_bucket_items(bucket_tasks: list[dict], groups: list[TaskGroup]) -> li
     group_items: list[dict] = []
     for grp in groups:
         t_list = tasks_by_group.get(grp.id, [])
-        ranked_t = sorted([t for t in t_list if t["rank"] is not None], key=lambda t: t["rank"])
+        ranked_t = sorted(
+            [t for t in t_list if t["rank"] is not None], key=lambda t: t["rank"]
+        )
         unranked_t = [t for t in t_list if t["rank"] is None]
-        group_items.append({
-            "type": "group",
-            "id": grp.id,
-            "name": grp.name,
-            "rank": grp.rank,
-            "items": ranked_t + unranked_t,
-        })
+        group_items.append(
+            {
+                "type": "group",
+                "id": grp.id,
+                "name": grp.name,
+                "rank": grp.rank,
+                "items": ranked_t + unranked_t,
+            }
+        )
 
-    ranked_s = sorted([t for t in standalone if t["rank"] is not None], key=lambda t: t["rank"])
+    ranked_s = sorted(
+        [t for t in standalone if t["rank"] is not None], key=lambda t: t["rank"]
+    )
     unranked_s = [t for t in standalone if t["rank"] is None]
-    ranked_g = sorted([g for g in group_items if g["rank"] is not None], key=lambda g: g["rank"])
+    ranked_g = sorted(
+        [g for g in group_items if g["rank"] is not None], key=lambda g: g["rank"]
+    )
     unranked_g = [g for g in group_items if g["rank"] is None]
 
     # merge ranked standalone tasks and ranked groups by rank value
@@ -188,6 +222,7 @@ def _build_bucket_items(bucket_tasks: list[dict], groups: list[TaskGroup]) -> li
 
 
 # ── Group CRUD ────────────────────────────────────────────────────────────────
+
 
 def create_group(
     session: Session,
@@ -253,6 +288,7 @@ def delete_group(session: Session, group_id: int, tasklist_id: str) -> bool:
 
 
 # ── Task overlay upsert ───────────────────────────────────────────────────────
+
 
 def upsert_overlay(
     session: Session,

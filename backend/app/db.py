@@ -7,14 +7,14 @@ from __future__ import annotations
 
 import os
 
-from sqlalchemy import event, text
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
-_DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "sqlite:///./overlay.db"
-)
+_DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./overlay.db")
 
-_connect_args = {"check_same_thread": False} if _DATABASE_URL.startswith("sqlite") else {}
+_connect_args = (
+    {"check_same_thread": False} if _DATABASE_URL.startswith("sqlite") else {}
+)
 
 engine = create_engine(_DATABASE_URL, connect_args=_connect_args)
 

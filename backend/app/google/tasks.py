@@ -8,12 +8,16 @@ never via MCP/LLM).
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from app.google._paging import list_all
 from app.google.auth import load_credentials
+
+# Sentinel so write wrappers can tell "field omitted" from "explicitly cleared".
+_UNSET: Any = object()
 
 
 def _tasks_service():
@@ -28,6 +32,9 @@ def _reshape_task(task: dict) -> dict:
         "status": task.get("status", "needsAction"),
         "due": task.get("due"),
         "notes": task.get("notes"),
+        # Subtasks render flat (goal 4a MVP); `parent` lets the client guard
+        # against ever dropping or duplicating a child task.
+        "parent": task.get("parent"),
     }
 
 
@@ -65,7 +72,10 @@ def _get_task(tasklist_id: str, task_id: str) -> dict | None:
     try:
         task = service.tasks().get(tasklist=tasklist_id, task=task_id).execute()
     except HttpError as exc:
-        if exc.resp.status == 404:
+        # An unknown / malformed task id is "not found" — Google returns 404 for
+        # some ids and 400 for others, so treat both as None (a single-task GET
+        # has no other meaning for a bad id). Lets callers raise a clean 404.
+        if exc.resp.status in (400, 404):
             return None
         raise
     return _reshape_task(task)
@@ -115,5 +125,64 @@ def _delete_task(tasklist_id: str, task_id: str) -> None:
 
 
 async def delete_task(tasklist_id: str, task_id: str) -> None:
-    # Only callable from app.writes.service.move (sanctioned-delete exception).
+    # Exactly two sanctioned callers (see .claude/rules/writes.md):
+    #   1. app.writes.service.move — after a confirmed successful insert.
+    #   2. app.writes.service.delete — the user delete endpoint, after the
+    #      frontend's undo window has closed.
     await asyncio.to_thread(_delete_task, tasklist_id, task_id)
+
+
+def _update_task_content(
+    tasklist_id: str,
+    task_id: str,
+    title: Any = _UNSET,
+    notes: Any = _UNSET,
+    status: Any = _UNSET,
+) -> dict:
+    service = _tasks_service()
+    body: dict = {}
+    if title is not _UNSET:
+        body["title"] = title
+    if notes is not _UNSET:
+        # Google clears `notes` when patched with an empty string.
+        body["notes"] = notes or ""
+    if status is not _UNSET:
+        body["status"] = status
+        # GOOGLE QUIRK: patching status back to needsAction does NOT always clear
+        # the stored `completed` timestamp; send completed=None to force it.
+        if status == "needsAction":
+            body["completed"] = None
+    task = (
+        service.tasks().patch(tasklist=tasklist_id, task=task_id, body=body).execute()
+    )
+    return _reshape_task(task)
+
+
+async def update_task_content(
+    tasklist_id: str,
+    task_id: str,
+    title: Any = _UNSET,
+    notes: Any = _UNSET,
+    status: Any = _UNSET,
+) -> dict:
+    """Patch a task's content fields (title / notes / status). Only the fields
+    explicitly provided are sent; completion rides the `status` field."""
+    return await asyncio.to_thread(
+        _update_task_content, tasklist_id, task_id, title, notes, status
+    )
+
+
+# ── Tasklist (list-level) write — the only write to the tasklists resource ─────
+
+
+def _update_tasklist(tasklist_id: str, title: str) -> dict:
+    service = _tasks_service()
+    tl = (
+        service.tasklists().patch(tasklist=tasklist_id, body={"title": title}).execute()
+    )
+    return {"id": tl["id"], "title": tl.get("title", "")}
+
+
+async def update_tasklist(tasklist_id: str, title: str) -> dict:
+    """Rename a task list (the one write to the tasklists resource, goal 4a)."""
+    return await asyncio.to_thread(_update_tasklist, tasklist_id, title)

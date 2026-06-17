@@ -84,6 +84,43 @@ curl -s -X POST "http://localhost:8010/tasks/$SRC/$UNDATED/move" \
   -d "{\"target_list_id\": \"$SRC\"}" | jq .
 ```
 
+## 2b. Content CRUD write checks (goal 4a)
+All against `$SRC` (a `zz-` list). Keep created titles prefixed `vt-` so cleanup catches them.
+
+```bash
+# Create → 201, undated (NO_DATE). Capture its id as $NEW.
+curl -s -X POST "http://localhost:8010/tasks/$SRC" \
+  -H 'Content-Type: application/json' -d '{"title": "vt-created", "rank": 1000}' | jq .
+# Empty title → 400 empty_title
+curl -s -X POST "http://localhost:8010/tasks/$SRC" \
+  -H 'Content-Type: application/json' -d '{"title": "   "}' | jq .
+
+# Edit title only / notes only (each: exactly the one field reaches Google)
+curl -s -X PATCH "http://localhost:8010/tasks/$SRC/$NEW" \
+  -H 'Content-Type: application/json' -d '{"title": "vt-renamed"}' | jq .
+curl -s -X PATCH "http://localhost:8010/tasks/$SRC/$NEW" \
+  -H 'Content-Type: application/json' -d '{"notes": "vt note"}' | jq .
+# Empty body → 400 no_fields; empty title → 400 empty_title; missing task → 404
+
+# Complete then uncomplete (status rides the same PATCH)
+curl -s -X PATCH "http://localhost:8010/tasks/$SRC/$NEW" \
+  -H 'Content-Type: application/json' -d '{"status": "completed"}' | jq .
+curl -s -X PATCH "http://localhost:8010/tasks/$SRC/$NEW" \
+  -H 'Content-Type: application/json' -d '{"status": "needsAction"}' | jq .
+
+# Delete (immediate backend delete + overlay row removal) → confirm gone in step 3
+curl -s -X DELETE "http://localhost:8010/tasks/$SRC/$NEW" | jq .
+
+# Rename the list, then rename it back to a zz- name (NEVER leave a non-zz title)
+curl -s -X PATCH "http://localhost:8010/lists/$SRC" \
+  -H 'Content-Type: application/json' -d '{"title": "zz-verifier-test-renamed"}' | jq .
+curl -s -X PATCH "http://localhost:8010/lists/$SRC" \
+  -H 'Content-Type: application/json' -d '{"title": "zz-verifier-test"}' | jq .
+```
+Checks: completed task carries a `completed` timestamp in Google, then clears on uncomplete; the
+deleted task is absent from `GET /tasks` and its overlay composite key is gone. **The list title
+must end as a `zz-` name** so the cleanup guard still recognises it.
+
 ## 3. Confirm the effect in Google (source of truth, not just the API echo)
 ```bash
 cd backend && uv run python - <<'PY'

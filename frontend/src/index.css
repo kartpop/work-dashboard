@@ -158,8 +158,9 @@ h1, h2, h3 {
 
 .task-item {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
   padding: 5px 0;
   border-bottom: 1px solid var(--border);
   cursor: default;
@@ -167,6 +168,95 @@ h1, h2, h3 {
 
 .task-item:last-child {
   border-bottom: none;
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Per-task controls (goal 4a) ───────────────────────────────────────────── */
+
+.task-check {
+  flex-shrink: 0;
+  cursor: pointer;
+  margin: 0;
+}
+
+.task-title-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font: inherit;
+  color: var(--text-h);
+  outline: none;
+}
+
+.task-title-input:focus {
+  border-color: var(--done);
+}
+
+.task-title {
+  cursor: text;
+}
+
+.notes-toggle {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--done);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 0 2px;
+  transition: transform 0.1s ease;
+}
+
+.notes-toggle--open {
+  transform: rotate(90deg);
+}
+
+.notes-toggle--has {
+  color: var(--text);
+}
+
+.task-date {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--done);
+  font-size: 12px;
+  padding: 1px 2px;
+  cursor: pointer;
+  color-scheme: light dark;
+}
+
+.task-date:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.task-notes {
+  width: 100%;
+  min-height: 44px;
+  resize: vertical;
+  background: var(--muted-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+}
+
+.task-notes:focus {
+  border-color: var(--done);
 }
 
 .drag-handle {
@@ -357,13 +447,13 @@ h1, h2, h3 {
   color: var(--text);
 }
 
+/* Portaled to <body>, so positioned `fixed` (top/right set inline). This is the
+   goal-4a clip fix: rendering outside the group container's overflow:hidden box
+   means the menu is never truncated for a task low in a tall group. */
 .task-menu-popover {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 20;
+  position: fixed;
+  z-index: 1100;
   min-width: 150px;
-  margin-top: 2px;
   padding: 4px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -372,6 +462,25 @@ h1, h2, h3 {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+.task-menu-delete {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  border-radius: 4px;
+  margin-top: 2px;
+  padding: 5px 6px;
+  font-size: 13px;
+  color: var(--error);
+  cursor: pointer;
+}
+
+.task-menu-delete:hover {
+  background: var(--muted-bg);
 }
 
 .task-menu-title {
@@ -441,4 +550,143 @@ h1, h2, h3 {
   font-size: 16px;
   line-height: 1;
   padding: 0 2px;
+}
+
+/* Action toast (Undo for completion + delete) — neutral, not an error. */
+.toast--action {
+  border-color: var(--border);
+  border-left-color: var(--done);
+  color: var(--text-h);
+}
+
+.toast-undo {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-h);
+  cursor: pointer;
+}
+
+.toast-undo:hover {
+  border-color: var(--done);
+}
+
+/* ── Panel head + refresh (goal 4a) ────────────────────────────────────────── */
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.panel-head h2 {
+  margin: 0;
+}
+
+.panel-refresh {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--done);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 3px 8px;
+}
+
+.panel-refresh:hover {
+  color: var(--text);
+  border-color: var(--done);
+}
+
+/* ── List header (inline rename) + add-task affordance (goal 4a) ───────────── */
+
+.list-header {
+  margin-bottom: 4px;
+}
+
+.list-title {
+  cursor: text;
+}
+
+.list-title-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-h);
+  outline: none;
+}
+
+.list-title-input:focus {
+  border-color: var(--done);
+}
+
+.add-task-btn {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--done);
+  font-size: 12px;
+  text-align: left;
+  padding: 2px;
+  margin-bottom: 4px;
+  cursor: pointer;
+}
+
+.add-task-btn:hover {
+  color: var(--text);
+}
+
+.add-task-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.add-task-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-h);
+  outline: none;
+}
+
+.add-task-input:focus {
+  border-color: var(--done);
+}
+
+.add-task-confirm,
+.add-task-cancel {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.add-task-confirm:hover {
+  border-color: var(--done);
+}
+
+.add-task-cancel:hover {
+  color: var(--done);
 }

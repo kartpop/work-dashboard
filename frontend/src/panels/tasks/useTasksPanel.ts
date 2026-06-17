@@ -8,9 +8,21 @@ export interface Task {
   status: string;
   due: string | null;
   notes: string | null;
+  // Google subtask parent id; rendered flat (MVP) — never dropped/duplicated.
+  parent: string | null;
   rank: number | null;
   group_id: number | null;
 }
+
+// A transient toast carrying an Undo affordance. Used by two distinct state
+// machines (see .claude/rules/tasks-panel.md): completion writes to Google
+// immediately (Undo = uncomplete), delete defers the Google write until the
+// window closes (Undo = cancel, zero Google writes).
+export interface ActionToast {
+  message: string;
+}
+
+const ACTION_TOAST_MS = 5000;
 
 export interface Group {
   type: "group";
@@ -43,6 +55,7 @@ interface TasksPanelState {
   isLoading: boolean;
   error: string | null;
   writeError: string | null;
+  actionToast: ActionToast | null;
 }
 
 // ── Pure helpers for optimistic state transforms ──────────────────────────────
@@ -186,6 +199,159 @@ function removeTaskFromList(
   };
 }
 
+/** Shallow-patch a task's fields wherever it lives (standalone or in a group). */
+function updateTaskFields(
+  state: TasksPanelState,
+  tasklistId: string,
+  taskId: string,
+  patch: Partial<Task>,
+): TasksPanelState {
+  return {
+    ...state,
+    taskLists: state.taskLists.map((list) => {
+      if (list.id !== tasklistId) return list;
+      return {
+        ...list,
+        buckets: list.buckets.map((b) => ({
+          ...b,
+          items: b.items.map((it) => {
+            if (it.type === "task" && it.id === taskId)
+              return { ...it, ...patch };
+            if (it.type === "group") {
+              return {
+                ...it,
+                items: it.items.map((t) =>
+                  t.id === taskId ? { ...t, ...patch } : t,
+                ),
+              };
+            }
+            return it;
+          }),
+        })),
+      };
+    }),
+  };
+}
+
+/** Insert a task at the top of a list's NO_DATE bucket (creating it if absent). */
+function insertAtTopOfNoDate(
+  state: TasksPanelState,
+  tasklistId: string,
+  task: Task,
+): TasksPanelState {
+  return {
+    ...state,
+    taskLists: state.taskLists.map((list) => {
+      if (list.id !== tasklistId) return list;
+      const idx = list.buckets.findIndex((b) => b.key === "NO_DATE");
+      if (idx === -1) {
+        return {
+          ...list,
+          buckets: [
+            ...list.buckets,
+            { label: "No date", key: "NO_DATE", items: [task] },
+          ],
+        };
+      }
+      return {
+        ...list,
+        buckets: list.buckets.map((b) =>
+          b.key === "NO_DATE" ? { ...b, items: [task, ...b.items] } : b,
+        ),
+      };
+    }),
+  };
+}
+
+/** Replace a standalone task (matched by id) in a list with a new task object. */
+function replaceTaskInList(
+  state: TasksPanelState,
+  tasklistId: string,
+  oldId: string,
+  newTask: Task,
+): TasksPanelState {
+  return {
+    ...state,
+    taskLists: state.taskLists.map((list) => {
+      if (list.id !== tasklistId) return list;
+      return {
+        ...list,
+        buckets: list.buckets.map((b) => ({
+          ...b,
+          items: b.items.map((it) =>
+            it.type === "task" && it.id === oldId ? newTask : it,
+          ),
+        })),
+      };
+    }),
+  };
+}
+
+// ── Client-side bucketing (move-to-list optimistic placement only) ─────────────
+// Mirrors the backend bucket rules (IST date key, NO_DATE, Overdue rollup) just
+// enough to drop a moved task into the right destination bucket WITHOUT a reload.
+// The backend remains the source of truth; a later refresh reconciles any drift.
+
+function istDateKey(d: Date): string {
+  const ist = new Date(d.getTime() + 5.5 * 3600 * 1000);
+  return ist.toISOString().slice(0, 10);
+}
+
+function bucketKeyForDue(due: string | null): string {
+  if (!due) return "NO_DATE";
+  const key = istDateKey(new Date(due));
+  return key < istDateKey(new Date()) ? "OVERDUE" : key;
+}
+
+function bucketLabelForKey(key: string): string {
+  if (key === "NO_DATE") return "No date";
+  if (key === "OVERDUE") return "Overdue";
+  const today = istDateKey(new Date());
+  if (key === today) return "Today";
+  const t = new Date(today + "T00:00:00Z");
+  const tomorrow = istDateKey(new Date(t.getTime() + 24 * 3600 * 1000));
+  if (key === tomorrow) return "Tomorrow";
+  return new Date(key + "T00:00:00Z").toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+/** Insert a moved task into a destination list at the top of its due-date bucket. */
+function insertMovedTask(
+  state: TasksPanelState,
+  targetListId: string,
+  task: Task,
+): TasksPanelState {
+  const key = bucketKeyForDue(task.due);
+  return {
+    ...state,
+    taskLists: state.taskLists.map((list) => {
+      if (list.id !== targetListId) return list;
+      const idx = list.buckets.findIndex((b) => b.key === key);
+      if (idx === -1) {
+        const bucket: Bucket = {
+          label: bucketLabelForKey(key),
+          key,
+          items: [task],
+        };
+        // Overdue sits at the top; everything else is appended (a later refresh
+        // settles exact ordering against the backend's sort).
+        return key === "OVERDUE"
+          ? { ...list, buckets: [bucket, ...list.buckets] }
+          : { ...list, buckets: [...list.buckets, bucket] };
+      }
+      return {
+        ...list,
+        buckets: list.buckets.map((b) =>
+          b.key === key ? { ...b, items: [task, ...b.items] } : b,
+        ),
+      };
+    }),
+  };
+}
+
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useTasksPanel() {
@@ -194,6 +360,7 @@ export function useTasksPanel() {
     isLoading: true,
     error: null,
     writeError: null,
+    actionToast: null,
   });
 
   // Holds the pre-op snapshot of taskLists, captured inside a setState updater
@@ -240,6 +407,68 @@ export function useTasksPanel() {
   const dismissWriteError = useCallback(() => {
     setState((s) => ({ ...s, writeError: null }));
   }, []);
+
+  // ── Action-toast state machine (Undo for completion + delete) ───────────────
+  // Only one toast is shown at a time. `onExpire` runs when the ~5s window
+  // closes (delete: fire the held Google DELETE; completion: no-op — the write
+  // already happened). `onUndo` runs on the Undo click. Pushing a new toast
+  // commits any in-flight one first, so a deferred delete can never be orphaned.
+  const toastTimerRef = useRef<number | null>(null);
+  const pendingExpireRef = useRef<(() => void) | null>(null);
+  const pendingUndoRef = useRef<(() => void) | null>(null);
+
+  const commitPending = useCallback(() => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    const expire = pendingExpireRef.current;
+    pendingExpireRef.current = null;
+    pendingUndoRef.current = null;
+    if (expire) expire();
+  }, []);
+
+  const pushActionToast = useCallback(
+    (message: string, onUndo: () => void, onExpire: () => void) => {
+      commitPending(); // flush any still-open window before opening a new one
+      pendingExpireRef.current = onExpire;
+      pendingUndoRef.current = onUndo;
+      setState((s) => ({ ...s, actionToast: { message } }));
+      toastTimerRef.current = window.setTimeout(() => {
+        toastTimerRef.current = null;
+        const expire = pendingExpireRef.current;
+        pendingExpireRef.current = null;
+        pendingUndoRef.current = null;
+        setState((s) => ({ ...s, actionToast: null }));
+        if (expire) expire();
+      }, ACTION_TOAST_MS);
+    },
+    [commitPending],
+  );
+
+  const undoActionToast = useCallback(() => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    const undo = pendingUndoRef.current;
+    pendingExpireRef.current = null;
+    pendingUndoRef.current = null;
+    setState((s) => ({ ...s, actionToast: null }));
+    if (undo) undo();
+  }, []);
+
+  // Flush any pending deferred action when the panel unmounts (don't orphan a
+  // delete that the user neither undid nor waited out).
+  useEffect(() => () => commitPending(), [commitPending]);
+
+  // Manual per-panel refresh (re-run GET /tasks) — surfaces phone-app changes
+  // and a recurring task's next instance after completion.
+  const refresh = useCallback(() => {
+    refetchSilently().catch((err: Error) =>
+      setState((s) => ({ ...s, writeError: `Refresh failed: ${err.message}` })),
+    );
+  }, [refetchSilently]);
 
   // Reorder a task within its current container (same group or same standalone zone).
   // Rank is pre-computed by the component.
@@ -442,6 +671,196 @@ export function useTasksPanel() {
     [],
   );
 
+  // ── Content CRUD (Google content writes, goal 4a) ──────────────────────────
+
+  // Create a task at the top of NO_DATE. Optimistic temp row → POST → reconcile
+  // the server-assigned id (insert-from-response, g3 createGroup pattern).
+  const createTask = useCallback(async (listId: string, title: string) => {
+    const trimmed = title.trim();
+    if (!trimmed) return; // empty title rejected client-side
+    const tempId = `temp-${Date.now()}`;
+    let snapshot: TaskList[] | null = null;
+    let rank = 1000;
+    setState((prev) => {
+      snapshot = prev.taskLists;
+      const list = prev.taskLists.find((l) => l.id === listId);
+      const noDate = list?.buckets.find((b) => b.key === "NO_DATE");
+      const topRank =
+        noDate && noDate.items.length
+          ? Math.min(...noDate.items.map((it, i) => it.rank ?? (i + 1) * 1000))
+          : 2000;
+      rank = topRank - 1000;
+      const temp: Task = {
+        type: "task",
+        id: tempId,
+        title: trimmed,
+        status: "needsAction",
+        due: null,
+        notes: null,
+        parent: null,
+        rank,
+        group_id: null,
+      };
+      return insertAtTopOfNoDate(prev, listId, temp);
+    });
+    try {
+      const created = await apiPost<Task>(`/tasks/${listId}`, {
+        title: trimmed,
+        rank,
+      });
+      setState((s) =>
+        replaceTaskInList(s, listId, tempId, { ...created, type: "task" }),
+      );
+    } catch (err) {
+      setState((s) => ({
+        ...s,
+        taskLists: snapshot ?? s.taskLists,
+        writeError: `Create failed: ${(err as Error).message}`,
+      }));
+    }
+  }, []);
+
+  // Inline edit of title or notes. The component guards same-value (so a no-op
+  // fires no PATCH); the hook applies optimistically and reconciles on failure.
+  const editTaskField = useCallback(
+    (
+      listId: string,
+      taskId: string,
+      patch: { title?: string; notes?: string },
+    ) => {
+      let snapshot: TaskList[] | null = null;
+      setState((prev) => {
+        snapshot = prev.taskLists;
+        return updateTaskFields(prev, listId, taskId, patch);
+      });
+      apiPatch(`/tasks/${listId}/${taskId}`, patch).catch((err: Error) => {
+        setState((s) => ({
+          ...s,
+          taskLists: snapshot ?? s.taskLists,
+          writeError: `Edit failed: ${err.message}`,
+        }));
+      });
+    },
+    [],
+  );
+
+  // Complete a task: optimistic remove from the active view + IMMEDIATE status
+  // write, plus an Undo toast. Undo uncompletes and restores the snapshot
+  // (position + group + any group auto-removed when it lost its last member).
+  const completeTask = useCallback(
+    (listId: string, taskId: string) => {
+      let snapshot: TaskList[] | null = null;
+      setState((prev) => {
+        snapshot = prev.taskLists;
+        return removeTaskFromList(prev, listId, taskId);
+      });
+      apiPatch(`/tasks/${listId}/${taskId}`, { status: "completed" }).catch(
+        (err: Error) => {
+          setState((s) => ({
+            ...s,
+            taskLists: snapshot ?? s.taskLists,
+            writeError: `Complete failed: ${err.message}`,
+          }));
+        },
+      );
+      pushActionToast(
+        "Task completed",
+        () => {
+          setState((s) => ({ ...s, taskLists: snapshot ?? s.taskLists }));
+          apiPatch(`/tasks/${listId}/${taskId}`, {
+            status: "needsAction",
+          }).catch((err: Error) => {
+            setState((s) => ({
+              ...s,
+              writeError: `Undo failed: ${err.message}`,
+            }));
+          });
+        },
+        () => {}, // expire: the complete write already happened
+      );
+    },
+    [pushActionToast],
+  );
+
+  // Delete a task: optimistic remove + Undo toast. The Google DELETE is HELD
+  // until the window closes (onExpire) — Undo cancels it with zero Google writes.
+  const deleteTask = useCallback(
+    (listId: string, taskId: string) => {
+      let snapshot: TaskList[] | null = null;
+      setState((prev) => {
+        snapshot = prev.taskLists;
+        return removeTaskFromList(prev, listId, taskId);
+      });
+      pushActionToast(
+        "Task deleted",
+        () => {
+          setState((s) => ({ ...s, taskLists: snapshot ?? s.taskLists }));
+        },
+        () => {
+          apiDelete(`/tasks/${listId}/${taskId}`).catch((err: Error) => {
+            setState((s) => ({
+              ...s,
+              taskLists: snapshot ?? s.taskLists,
+              writeError: `Delete failed: ${err.message}`,
+            }));
+          });
+        },
+      );
+    },
+    [pushActionToast],
+  );
+
+  // Set / change / clear an arbitrary due date via the picker. Reuses the g4
+  // reschedule endpoint (no new endpoint). Optimistically removes the row, then
+  // silently refetches so it re-buckets correctly — including dates with no
+  // existing bucket and the Overdue rollup (which drag cannot reach).
+  const setDueDate = useCallback(
+    (listId: string, taskId: string, dueDate: string | null) => {
+      let snapshot: TaskList[] | null = null;
+      setState((prev) => {
+        snapshot = prev.taskLists;
+        return removeTaskFromList(prev, listId, taskId);
+      });
+      apiPost(`/tasks/${listId}/${taskId}/reschedule`, {
+        due_date: dueDate,
+        group_id: null,
+      })
+        .then(() => refetchSilently().catch(() => {}))
+        .catch((err: Error) => {
+          setState((s) => ({
+            ...s,
+            taskLists: snapshot ?? s.taskLists,
+            writeError: `Reschedule failed: ${err.message}`,
+          }));
+        });
+    },
+    [refetchSilently],
+  );
+
+  // Rename a list header → PATCH the tasklists resource. Component guards
+  // same-value. Optimistic with snapshot-rollback + toast on failure.
+  const renameList = useCallback((listId: string, title: string) => {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    let snapshot: TaskList[] | null = null;
+    setState((prev) => {
+      snapshot = prev.taskLists;
+      return {
+        ...prev,
+        taskLists: prev.taskLists.map((l) =>
+          l.id === listId ? { ...l, title: trimmed } : l,
+        ),
+      };
+    });
+    apiPatch(`/lists/${listId}`, { title: trimmed }).catch((err: Error) => {
+      setState((s) => ({
+        ...s,
+        taskLists: snapshot ?? s.taskLists,
+        writeError: `Rename failed: ${err.message}`,
+      }));
+    });
+  }, []);
+
   // ── Google writes (snapshot + optimistic + POST + rollback + toast) ─────────
 
   // Cross-bucket drag = reschedule. Moves a task to another date-bucket in the
@@ -505,26 +924,44 @@ export function useTasksPanel() {
   );
 
   // Move a task to another list via the menu (insert + delete on the backend).
-  // Optimistically remove it here; on success silently refetch so it appears
-  // in the target list correctly bucketed. Rollback + toast on failure.
+  // Optimistic on BOTH sides (g4a fix): remove from the source immediately, and
+  // on success insert the moved task into the destination from the move response
+  // (its new id) — the g3 insert-from-response pattern, NOT a refetch (the old
+  // refetch was the ~2-3s destination lag). Rollback + toast on failure.
   const moveTaskToList = useCallback(
     (listId: string, taskId: string, targetListId: string) => {
+      let snapshot: TaskList[] | null = null;
+      let moved: Task | null = null;
       setState((prev) => {
-        snapshotRef.current = prev.taskLists;
+        snapshot = prev.taskLists;
+        const list = prev.taskLists.find((l) => l.id === listId);
+        if (list) {
+          for (const b of list.buckets) {
+            const found = findTaskInItems(b.items, taskId);
+            if (found) {
+              moved = found;
+              break;
+            }
+          }
+        }
         return removeTaskFromList(prev, listId, taskId);
       });
 
-      apiPost(`/tasks/${listId}/${taskId}/move`, {
-        target_list_id: targetListId,
-      })
-        .then(() => {
-          // Move succeeded server-side. Silently refetch so the moved task
-          // shows in its destination. A refetch failure is NOT a move rollback
-          // (the task already moved) — swallow it; next load will reconcile.
-          refetchSilently().catch(() => {});
+      apiPost<{ new_task_id: string; rank: number | null }>(
+        `/tasks/${listId}/${taskId}/move`,
+        { target_list_id: targetListId },
+      )
+        .then((res) => {
+          if (!moved) return;
+          const inserted: Task = {
+            ...(moved as Task),
+            id: res.new_task_id,
+            rank: res.rank,
+            group_id: null,
+          };
+          setState((s) => insertMovedTask(s, targetListId, inserted));
         })
         .catch((err: Error) => {
-          const snapshot = snapshotRef.current;
           setState((s) => ({
             ...s,
             taskLists: snapshot ?? s.taskLists,
@@ -532,7 +969,7 @@ export function useTasksPanel() {
           }));
         });
     },
-    [refetchSilently],
+    [],
   );
 
   return {
@@ -546,5 +983,13 @@ export function useTasksPanel() {
     rescheduleTask,
     moveTaskToList,
     dismissWriteError,
+    createTask,
+    editTaskField,
+    completeTask,
+    deleteTask,
+    setDueDate,
+    renameList,
+    refresh,
+    undoActionToast,
   };
 }

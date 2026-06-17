@@ -110,6 +110,73 @@ async def move_task(
     )
 
 
+# ── Task content CRUD (goal 4a) ────────────────────────────────────────────────
+
+
+class TaskCreate(BaseModel):
+    title: str
+    rank: Optional[float] = None  # top-of-bucket rank computed by the client
+
+
+class TaskContentUpdate(BaseModel):
+    # All optional; "field omitted" vs "explicitly null" is read from
+    # model_fields_set (the goal-3 PATCH partial-update convention).
+    title: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None  # "needsAction" | "completed"
+
+
+class ListRename(BaseModel):
+    title: str
+
+
+@router.post("/tasks/{tasklist_id}", status_code=201)
+async def create_task(
+    tasklist_id: str,
+    body: TaskCreate,
+    session: Session = Depends(get_session),
+):
+    return await writes_svc.create_task(
+        session, tasklist_id=tasklist_id, title=body.title, rank=body.rank
+    )
+
+
+@router.patch("/tasks/{tasklist_id}/{task_id}")
+async def update_task(
+    tasklist_id: str,
+    task_id: str,
+    body: TaskContentUpdate,
+    session: Session = Depends(get_session),
+):
+    fields = body.model_fields_set
+    if not fields & {"title", "notes", "status"}:
+        raise ApiError(
+            400, "no_fields", "Provide at least one of title, notes, or status."
+        )
+    return await writes_svc.update_content(
+        session,
+        tasklist_id=tasklist_id,
+        task_id=task_id,
+        title=body.title if "title" in fields else writes_svc._UNSET,
+        notes=body.notes if "notes" in fields else writes_svc._UNSET,
+        status=body.status if "status" in fields else writes_svc._UNSET,
+    )
+
+
+@router.delete("/tasks/{tasklist_id}/{task_id}")
+async def delete_task(
+    tasklist_id: str,
+    task_id: str,
+    session: Session = Depends(get_session),
+):
+    return await writes_svc.delete(session, tasklist_id=tasklist_id, task_id=task_id)
+
+
+@router.patch("/lists/{tasklist_id}")
+async def rename_list(tasklist_id: str, body: ListRename):
+    return await writes_svc.rename_list(tasklist_id, body.title)
+
+
 # ── Group CRUD ────────────────────────────────────────────────────────────────
 
 

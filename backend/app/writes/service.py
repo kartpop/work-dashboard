@@ -8,6 +8,8 @@ in `app.google.tasks`; merge/group helpers live in `app.overlay.service`. See
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlmodel import Session
 
 from app.errors import ApiError
@@ -16,6 +18,7 @@ from app.overlay import service as overlay_svc
 from app.overlay.models import TaskOverlay
 
 _NO_DATE = "NO_DATE"
+_UNSET: Any = object()
 
 
 async def reschedule(
@@ -141,3 +144,121 @@ async def move(
         "rank": row.rank,
         "group_id": None,
     }
+
+
+# ── Content CRUD (goal 4a) ─────────────────────────────────────────────────────
+
+
+async def create_task(
+    session: Session,
+    tasklist_id: str,
+    title: str,
+    rank: float | None,
+) -> dict:
+    """Create a task in a list's NO_DATE bucket (no due) and seed its overlay row.
+
+    Returns the merged task shape so the client can insert-from-response (no
+    refetch). New tasks always land undated — dates are set via the picker
+    (reschedule).
+    """
+    if not title.strip():
+        raise ApiError(400, "empty_title", "Task title must not be empty.")
+
+    try:
+        new = await tasks_client.insert_task(
+            tasklist_id, {"title": title, "status": "needsAction"}
+        )
+    except Exception as exc:
+        raise ApiError(
+            502, "google_insert_failed", "Could not create the task."
+        ) from exc
+
+    row = overlay_svc.upsert_overlay(
+        session, tasklist_id, new["id"], rank=rank, group_id=None
+    )
+    return {**new, "type": "task", "rank": row.rank, "group_id": row.group_id}
+
+
+async def update_content(
+    session: Session,
+    tasklist_id: str,
+    task_id: str,
+    title: Any = _UNSET,
+    notes: Any = _UNSET,
+    status: Any = _UNSET,
+) -> dict:
+    """Patch a task's Google content fields (title / notes / status).
+
+    Only fields explicitly provided are written. Completion/uncompletion rides
+    the `status` field (completion writes immediately — see writes.md). The
+    overlay row is untouched (rank/group are not Google content).
+    """
+    if title is not _UNSET and not str(title).strip():
+        raise ApiError(400, "empty_title", "Task title must not be empty.")
+
+    current = await tasks_client.get_task(tasklist_id, task_id)
+    if current is None:
+        raise ApiError(404, "task_not_found", "Task not found.")
+
+    # Forward only the fields the caller actually set, so the thin wrapper's own
+    # _UNSET default governs what reaches the Google patch body (the sentinels in
+    # this module and the client module are intentionally separate objects).
+    fields: dict[str, Any] = {}
+    if title is not _UNSET:
+        fields["title"] = title
+    if notes is not _UNSET:
+        fields["notes"] = notes
+    if status is not _UNSET:
+        fields["status"] = status
+
+    try:
+        updated = await tasks_client.update_task_content(tasklist_id, task_id, **fields)
+    except Exception as exc:
+        raise ApiError(
+            502, "google_write_failed", "Could not update the task."
+        ) from exc
+
+    overlay = session.get(TaskOverlay, (tasklist_id, task_id))
+    return {
+        **updated,
+        "type": "task",
+        "rank": overlay.rank if overlay else None,
+        "group_id": overlay.group_id if overlay else None,
+    }
+
+
+async def delete(session: Session, tasklist_id: str, task_id: str) -> dict:
+    """Delete a task from Google and drop its overlay row.
+
+    Immediate on the backend — the ~5s deferral + undo is entirely a frontend
+    concern (an undo means this endpoint is never called → zero Google writes).
+    This is the second sanctioned `delete_task` caller (the first is `move`).
+    """
+    current = await tasks_client.get_task(tasklist_id, task_id)
+    if current is None:
+        raise ApiError(404, "task_not_found", "Task not found.")
+
+    try:
+        await tasks_client.delete_task(tasklist_id, task_id)
+    except Exception as exc:
+        raise ApiError(
+            502, "google_delete_failed", "Could not delete the task."
+        ) from exc
+
+    row = session.get(TaskOverlay, (tasklist_id, task_id))
+    if row is not None:
+        session.delete(row)
+        session.commit()
+    return {"tasklist_id": tasklist_id, "task_id": task_id, "deleted": True}
+
+
+async def rename_list(tasklist_id: str, title: str) -> dict:
+    """Rename a task list (write to the tasklists resource, not a task)."""
+    if not title.strip():
+        raise ApiError(400, "empty_title", "List title must not be empty.")
+    try:
+        return await tasks_client.update_tasklist(tasklist_id, title)
+    except Exception as exc:
+        raise ApiError(
+            502, "google_write_failed", "Could not rename the list."
+        ) from exc

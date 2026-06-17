@@ -18,6 +18,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import {
   type Bucket,
@@ -32,6 +33,25 @@ import {
 interface ListRef {
   id: string;
   title: string;
+}
+
+// Per-task action handlers, bundled so they thread cleanly down to every task
+// (standalone or grouped) without a long prop list at each level.
+interface TaskActions {
+  otherLists: ListRef[];
+  onMoveToList: (taskId: string, targetListId: string) => void;
+  onComplete: (taskId: string) => void;
+  onEditTitle: (taskId: string, title: string) => void;
+  onEditNotes: (taskId: string, notes: string) => void;
+  onSetDueDate: (taskId: string, date: string | null) => void;
+  onDelete: (taskId: string) => void;
+}
+
+/** RFC3339 UTC due → "YYYY-MM-DD" (IST) for an <input type="date">; "" if unset. */
+function dueToDateInput(due: string | null): string {
+  if (!due) return "";
+  const ist = new Date(new Date(due).getTime() + 5.5 * 3600 * 1000);
+  return ist.toISOString().slice(0, 10);
 }
 
 // ── Rank helpers ──────────────────────────────────────────────────────────────
@@ -133,17 +153,10 @@ function findBucketForId(buckets: Bucket[], id: string): Bucket | null {
 interface SortableTaskProps {
   task: Task;
   compact?: boolean;
-  // otherLists is the move-to-list picker set (current list already excluded).
-  otherLists: ListRef[];
-  onMoveToList: (taskId: string, targetListId: string) => void;
+  actions: TaskActions;
 }
 
-function SortableTask({
-  task,
-  compact,
-  otherLists,
-  onMoveToList,
-}: SortableTaskProps) {
+function SortableTask({ task, compact, actions }: SortableTaskProps) {
   const {
     attributes,
     listeners,
@@ -157,18 +170,61 @@ function SortableTask({
   });
 
   const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+  // Menu popover is rendered in a portal (escapes the group's clip context, so
+  // it is never truncated for a task low in a tall group or a one-item group).
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(
+    null,
+  );
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const [editing, setEditing] = useState(false);
+  const [titleInput, setTitleInput] = useState(task.title);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notesInput, setNotesInput] = useState(task.notes ?? "");
 
   useEffect(() => {
     if (!menuOpen) return;
     function onPointerDown(e: PointerEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+      const t = e.target as Node;
+      if (
+        !menuBtnRef.current?.contains(t) &&
+        !popoverRef.current?.contains(t)
+      ) {
         setMenuOpen(false);
       }
     }
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [menuOpen]);
+
+  function openMenu() {
+    const rect = menuBtnRef.current?.getBoundingClientRect();
+    if (rect) {
+      setMenuPos({
+        top: rect.bottom + 2,
+        right: window.innerWidth - rect.right,
+      });
+    }
+    setMenuOpen((o) => !o);
+  }
+
+  function commitTitle() {
+    setEditing(false);
+    const trimmed = titleInput.trim();
+    if (trimmed && trimmed !== task.title) {
+      actions.onEditTitle(task.id, trimmed); // same-value fires no PATCH
+    } else {
+      setTitleInput(task.title);
+    }
+  }
+
+  function commitNotes() {
+    const next = notesInput;
+    if (next !== (task.notes ?? "")) {
+      actions.onEditNotes(task.id, next);
+    }
+  }
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -182,51 +238,135 @@ function SortableTask({
       style={style}
       className={`task-item${compact ? " task-item--compact" : ""}`}
     >
-      <span
-        className="drag-handle"
-        {...attributes}
-        {...listeners}
-        aria-label="drag to reorder"
-      >
-        ⠿
-      </span>
-      <span className="task-title">{task.title}</span>
-      <div className="task-menu-wrap" ref={menuRef}>
+      <div className="task-row">
+        <span
+          className="drag-handle"
+          {...attributes}
+          {...listeners}
+          aria-label="drag to reorder"
+        >
+          ⠿
+        </span>
+        <input
+          type="checkbox"
+          className="task-check"
+          checked={task.status === "completed"}
+          aria-label="complete task"
+          onPointerDown={(e) => e.stopPropagation()}
+          onChange={() => actions.onComplete(task.id)}
+        />
+        {editing ? (
+          <input
+            className="task-title-input"
+            value={titleInput}
+            autoFocus
+            onChange={(e) => setTitleInput(e.target.value)}
+            onBlur={commitTitle}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitTitle();
+              if (e.key === "Escape") {
+                setEditing(false);
+                setTitleInput(task.title);
+              }
+            }}
+          />
+        ) : (
+          <span
+            className="task-title"
+            title="Click to edit"
+            onClick={() => {
+              setTitleInput(task.title);
+              setEditing(true);
+            }}
+          >
+            {task.title}
+          </span>
+        )}
         <button
+          className={`notes-toggle${notesOpen ? " notes-toggle--open" : ""}${task.notes ? " notes-toggle--has" : ""}`}
+          aria-label={notesOpen ? "hide notes" : "show notes"}
+          aria-expanded={notesOpen}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => {
+            setNotesInput(task.notes ?? "");
+            setNotesOpen((o) => !o);
+          }}
+        >
+          ▸
+        </button>
+        <input
+          type="date"
+          className="task-date"
+          value={dueToDateInput(task.due)}
+          aria-label="due date"
+          onPointerDown={(e) => e.stopPropagation()}
+          onChange={(e) =>
+            actions.onSetDueDate(task.id, e.target.value || null)
+          }
+        />
+        <button
+          ref={menuBtnRef}
           className="task-menu"
           aria-label="task actions"
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
-            setMenuOpen((o) => !o);
+            openMenu();
           }}
         >
           ⋯
         </button>
-        {menuOpen && (
-          <div className="task-menu-popover" role="menu">
+      </div>
+      {notesOpen && (
+        <textarea
+          className="task-notes"
+          placeholder="Add notes"
+          value={notesInput}
+          onPointerDown={(e) => e.stopPropagation()}
+          onChange={(e) => setNotesInput(e.target.value)}
+          onBlur={commitNotes}
+        />
+      )}
+      {menuOpen &&
+        menuPos &&
+        createPortal(
+          <div
+            ref={popoverRef}
+            className="task-menu-popover"
+            role="menu"
+            style={{ top: menuPos.top, right: menuPos.right }}
+          >
             <span className="task-menu-title">Move to list…</span>
-            {otherLists.length === 0 ? (
+            {actions.otherLists.length === 0 ? (
               <span className="task-menu-empty">No other lists</span>
             ) : (
-              otherLists.map((l) => (
+              actions.otherLists.map((l) => (
                 <button
                   key={l.id}
                   className="move-to-list-option"
                   role="menuitem"
-                  onClick={(e) => {
-                    e.stopPropagation();
+                  onClick={() => {
                     setMenuOpen(false);
-                    onMoveToList(task.id, l.id);
+                    actions.onMoveToList(task.id, l.id);
                   }}
                 >
                   {l.title}
                 </button>
               ))
             )}
-          </div>
+            <button
+              className="task-menu-delete"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                actions.onDelete(task.id);
+              }}
+            >
+              Delete
+            </button>
+          </div>,
+          document.body,
         )}
-      </div>
     </li>
   );
 }
@@ -235,18 +375,16 @@ function SortableTask({
 
 interface GroupContainerProps {
   group: Group;
-  otherLists: ListRef[];
+  actions: TaskActions;
   onRename: (groupId: number, name: string) => void;
   onDelete: (groupId: number) => void;
-  onMoveToList: (taskId: string, targetListId: string) => void;
 }
 
 function GroupContainer({
   group,
-  otherLists,
+  actions,
   onRename,
   onDelete,
-  onMoveToList,
 }: GroupContainerProps) {
   const {
     attributes,
@@ -325,13 +463,7 @@ function GroupContainer({
       </div>
       <ul className="group-tasks">
         {group.items.map((task) => (
-          <SortableTask
-            key={task.id}
-            task={task}
-            compact
-            otherLists={otherLists}
-            onMoveToList={onMoveToList}
-          />
+          <SortableTask key={task.id} task={task} compact actions={actions} />
         ))}
       </ul>
     </div>
@@ -352,7 +484,7 @@ const collisionDetection: CollisionDetection = (args) => {
 interface BucketSectionProps {
   bucket: Bucket;
   list: TaskList;
-  otherLists: ListRef[];
+  actions: TaskActions;
   onRenameGroup: (
     tasklistId: string,
     groupId: number,
@@ -365,17 +497,15 @@ interface BucketSectionProps {
     bucketKey: string,
   ) => void;
   onCreateGroup: (tasklistId: string, bucketKey: string, name: string) => void;
-  onMoveToList: (taskId: string, targetListId: string) => void;
 }
 
 function BucketSection({
   bucket,
   list,
-  otherLists,
+  actions,
   onRenameGroup,
   onDeleteGroup,
   onCreateGroup,
-  onMoveToList,
 }: BucketSectionProps) {
   const [addingGroup, setAddingGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState("");
@@ -402,22 +532,16 @@ function BucketSection({
         <ul ref={setDroppableRef} className="bucket-droppable">
           {bucket.items.map((item) =>
             item.type === "task" ? (
-              <SortableTask
-                key={item.id}
-                task={item}
-                otherLists={otherLists}
-                onMoveToList={onMoveToList}
-              />
+              <SortableTask key={item.id} task={item} actions={actions} />
             ) : (
               <li key={`group-${item.id}`} className="group-item-wrapper">
                 <GroupContainer
                   group={item}
-                  otherLists={otherLists}
+                  actions={actions}
                   onRename={(gid, name) =>
                     onRenameGroup(list.id, gid, bucket.key, name)
                   }
                   onDelete={(gid) => onDeleteGroup(list.id, gid, bucket.key)}
-                  onMoveToList={onMoveToList}
                 />
               </li>
             ),
@@ -508,6 +632,13 @@ interface TaskListSectionProps {
   onDeleteGroup: BucketSectionProps["onDeleteGroup"];
   onCreateGroup: BucketSectionProps["onCreateGroup"];
   onMoveToList: (listId: string, taskId: string, targetListId: string) => void;
+  onCompleteTask: (listId: string, taskId: string) => void;
+  onEditTitle: (listId: string, taskId: string, title: string) => void;
+  onEditNotes: (listId: string, taskId: string, notes: string) => void;
+  onSetDueDate: (listId: string, taskId: string, date: string | null) => void;
+  onDeleteTask: (listId: string, taskId: string) => void;
+  onCreateTask: (listId: string, title: string) => void;
+  onRenameList: (listId: string, title: string) => void;
 }
 
 function TaskListSection({
@@ -521,6 +652,13 @@ function TaskListSection({
   onDeleteGroup,
   onCreateGroup,
   onMoveToList,
+  onCompleteTask,
+  onEditTitle,
+  onEditNotes,
+  onSetDueDate,
+  onDeleteTask,
+  onCreateTask,
+  onRenameList,
 }: TaskListSectionProps) {
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -528,6 +666,41 @@ function TaskListSection({
       coordinateGetter: sortableKeyboardCoordinates,
     }),
   );
+
+  const actions: TaskActions = {
+    otherLists,
+    onMoveToList: (taskId, targetListId) =>
+      onMoveToList(list.id, taskId, targetListId),
+    onComplete: (taskId) => onCompleteTask(list.id, taskId),
+    onEditTitle: (taskId, title) => onEditTitle(list.id, taskId, title),
+    onEditNotes: (taskId, notes) => onEditNotes(list.id, taskId, notes),
+    onSetDueDate: (taskId, date) => onSetDueDate(list.id, taskId, date),
+    onDelete: (taskId) => onDeleteTask(list.id, taskId),
+  };
+
+  // Inline rename of the list header + the per-list "+ add task" affordance.
+  const [renaming, setRenaming] = useState(false);
+  const [titleInput, setTitleInput] = useState(list.title);
+  const [adding, setAdding] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+
+  function commitListRename() {
+    setRenaming(false);
+    const trimmed = titleInput.trim();
+    if (trimmed && trimmed !== list.title) {
+      onRenameList(list.id, trimmed); // same-value fires no PATCH
+    } else {
+      setTitleInput(list.title);
+    }
+  }
+
+  function submitNewTask() {
+    const title = newTitle.trim();
+    if (!title) return;
+    onCreateTask(list.id, title);
+    setNewTitle("");
+    setAdding(false);
+  }
 
   // Keep a ref to the latest buckets for use inside handleDragEnd (which is a
   // stable-ish closure invoked after render). Update the ref in an effect so we
@@ -641,6 +814,9 @@ function TaskListSection({
 
     // ── Cross-bucket drag = RESCHEDULE ────────────────────────────────────────
     if (destBucket.key !== srcBucket.key) {
+      // Overdue is a render-only rollup, not a real date — never a drop target
+      // for a reschedule (past dates are reachable via the date-picker instead).
+      if (destBucket.key === "OVERDUE") return;
       const dueDate = destBucket.key === "NO_DATE" ? null : destBucket.key;
       const destGroupId =
         destContainer.type === "group" ? destContainer.groupId : null;
@@ -814,7 +990,69 @@ function TaskListSection({
 
   return (
     <div className="task-list-section">
-      <h3>{list.title}</h3>
+      <div className="list-header">
+        {renaming ? (
+          <input
+            className="list-title-input"
+            value={titleInput}
+            autoFocus
+            onChange={(e) => setTitleInput(e.target.value)}
+            onBlur={commitListRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitListRename();
+              if (e.key === "Escape") {
+                setRenaming(false);
+                setTitleInput(list.title);
+              }
+            }}
+          />
+        ) : (
+          <h3
+            className="list-title"
+            title="Click to rename list"
+            onClick={() => {
+              setTitleInput(list.title);
+              setRenaming(true);
+            }}
+          >
+            {list.title}
+          </h3>
+        )}
+      </div>
+      {adding ? (
+        <div className="add-task-form">
+          <input
+            className="add-task-input"
+            placeholder="New task"
+            value={newTitle}
+            autoFocus
+            onChange={(e) => setNewTitle(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submitNewTask();
+              if (e.key === "Escape") {
+                setAdding(false);
+                setNewTitle("");
+              }
+            }}
+          />
+          <button className="add-task-confirm" onClick={submitNewTask}>
+            Add
+          </button>
+          <button
+            className="add-task-cancel"
+            onClick={() => {
+              setAdding(false);
+              setNewTitle("");
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button className="add-task-btn" onClick={() => setAdding(true)}>
+          + add task
+        </button>
+      )}
       <DndContext
         sensors={sensors}
         collisionDetection={collisionDetection}
@@ -825,13 +1063,10 @@ function TaskListSection({
             key={bucket.key}
             bucket={bucket}
             list={list}
-            otherLists={otherLists}
+            actions={actions}
             onRenameGroup={onRenameGroup}
             onDeleteGroup={onDeleteGroup}
             onCreateGroup={onCreateGroup}
-            onMoveToList={(taskId, targetListId) =>
-              onMoveToList(list.id, taskId, targetListId)
-            }
           />
         ))}
       </DndContext>
@@ -847,6 +1082,7 @@ export function TasksPanel() {
     isLoading,
     error,
     writeError,
+    actionToast,
     reorderTask,
     moveTask,
     reorderGroup,
@@ -856,9 +1092,18 @@ export function TasksPanel() {
     rescheduleTask,
     moveTaskToList,
     dismissWriteError,
+    createTask,
+    editTaskField,
+    completeTask,
+    deleteTask,
+    setDueDate,
+    renameList,
+    refresh,
+    undoActionToast,
   } = useTasksPanel();
 
-  // Auto-dismiss the toast after ~4s.
+  // Auto-dismiss the error toast after ~4s. (The action toast self-expires in
+  // the hook after ~5s, committing any deferred write.)
   useEffect(() => {
     if (!writeError) return;
     const id = window.setTimeout(dismissWriteError, 4000);
@@ -872,7 +1117,17 @@ export function TasksPanel() {
 
   return (
     <section className="panel">
-      <h2>Tasks</h2>
+      <div className="panel-head">
+        <h2>Tasks</h2>
+        <button
+          className="panel-refresh"
+          aria-label="refresh tasks"
+          title="Refresh"
+          onClick={refresh}
+        >
+          ⟳
+        </button>
+      </div>
       {isLoading && <p className="panel-status">Loading…</p>}
       {error && <p className="panel-status panel-error">{error}</p>}
       {!isLoading &&
@@ -892,8 +1147,27 @@ export function TasksPanel() {
               void createGroup(listId, bucketKey, name)
             }
             onMoveToList={moveTaskToList}
+            onCompleteTask={completeTask}
+            onEditTitle={(listId, taskId, title) =>
+              editTaskField(listId, taskId, { title })
+            }
+            onEditNotes={(listId, taskId, notes) =>
+              editTaskField(listId, taskId, { notes })
+            }
+            onSetDueDate={setDueDate}
+            onDeleteTask={deleteTask}
+            onCreateTask={(listId, title) => void createTask(listId, title)}
+            onRenameList={renameList}
           />
         ))}
+      {actionToast && (
+        <div className="toast toast--action" role="status">
+          <span>{actionToast.message}</span>
+          <button className="toast-undo" onClick={undoActionToast}>
+            Undo
+          </button>
+        </div>
+      )}
       {writeError && (
         <div className="toast" role="alert">
           <span>{writeError}</span>

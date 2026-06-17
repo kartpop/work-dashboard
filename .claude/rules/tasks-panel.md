@@ -84,6 +84,70 @@ move already happened server-side) — only a *move* failure rolls back.
 
 ---
 
+## Goal 4a — full task CRUD (tasks MVP)
+
+### Per-task controls
+`SortableTask` now renders, inside a `.task-row` (the `.task-item` is a flex **column** so notes
+sit below): a complete **checkbox**, an inline-editable title (click → `.task-title-input`,
+Enter/blur commits), a notes **expand triangle** (`.notes-toggle`) that reveals a
+`.task-notes` textarea (collapsed by default, commits on blur), an `<input type="date">`
+(`.task-date`) for arbitrary due dates, and the `⋯` menu. **Same-value edits fire no write** —
+the *component* guards (compares trimmed input to the current value) exactly like the g3 group
+rename; the hook always writes when called. Empty title is rejected client-side. Every control
+except the drag handle calls `e.stopPropagation()` on `onPointerDown` so interacting with it
+never starts a drag.
+
+### New-task insertion (insert-from-response)
+Per-list "+ add task" → `createTask` inserts an optimistic temp row (id `temp-…`) at the top of
+the `NO_DATE` bucket (creating the bucket if absent) with a top rank `(min existing rank) − 1000`,
+POSTs `/tasks/{list}`, then **replaces the temp row** with the server task (real id) — the g3
+`createGroup` insert-from-response pattern, no reload.
+
+### Date-picker → reschedule
+`setDueDate` reuses the g4 `POST …/reschedule` endpoint (no new endpoint): optimistic-remove the
+row, POST, then **silently refetch** so it re-buckets correctly — including dates with **no
+existing bucket** and the **Overdue** rollup, which drag cannot reach. Clearing the date sends
+`due_date: null` (→ `NO_DATE`).
+
+### Overdue rollup (render-only)
+The backend rolls all past-due items into one synthetic bucket `{key:"OVERDUE"}` at the top.
+It is **not a drag/reschedule target** — `handleDragEnd` returns early if `destBucket.key ===
+"OVERDUE"` (its key is not a real date). Past dates are set via the picker, not by dragging in.
+
+### Two undo-toast state machines (`pushActionToast` / `undoActionToast`)
+One action-toast is shown at a time; the hook owns the ~5s timer (refs, not component state, so a
+deferred write survives re-renders). `pushActionToast(message, onUndo, onExpire)` **commits any
+in-flight toast first** (`commitPending`) so a deferred delete can never be orphaned; the unmount
+cleanup also flushes. The two machines differ only in their callbacks:
+- **Completion** — write fires **immediately** (`PATCH status:"completed"`); `onExpire` is a no-op;
+  `onUndo` restores the pre-op snapshot **and** `PATCH status:"needsAction"`. Optimistic remove
+  uses `removeTaskFromList` (drops an emptied source group; restored from snapshot on undo).
+- **Delete** — `onExpire` fires the held `apiDelete`; `onUndo` just restores the snapshot (**zero
+  Google writes**). Delete failure after the window → rollback + error toast.
+
+### Move-menu fixes (the two g4 bugs)
+1. **Clip fix:** the `⋯` menu (`.task-menu-popover`) is rendered via `createPortal` to
+   `document.body` and positioned `fixed` from the trigger's `getBoundingClientRect()` — it escapes
+   the group container's `overflow:hidden`, so it is never truncated for a task low in a tall group
+   or a one-item group. The outside-click handler checks **both** the trigger and the portaled
+   popover (refs) before closing. The menu also now carries a **Delete** action.
+2. **Optimistic destination:** `moveTaskToList` no longer refetches. It captures the moved task,
+   removes it from the source, POSTs, then inserts it into the destination **from the move
+   response's `new_task_id`** (`insertMovedTask`, placing it by its due date via the client
+   `bucketKeyForDue`/`bucketLabelForKey` helpers). Both sides are optimistic; a later refresh
+   settles exact ordering.
+
+### List rename + manual refresh
+Inline-editable list header (`.list-title` → `.list-title-input`) → `renameList` → `PATCH
+/lists/{id}` (component guards same-value). A per-panel `.panel-refresh` button calls `refresh`
+(generalised `refetchSilently`) to surface phone-app changes and a recurring task's next instance.
+
+### Subtasks (MVP)
+Tasks carry a `parent` field (passed through from Google) but render **flat as standalone**. No
+nesting UI; a `parent` task is never dropped or duplicated (it's just another flat row).
+
+---
+
 ## Bug log — what broke, why, and what fixed it
 
 ### 1. Groups can only be dragged once
