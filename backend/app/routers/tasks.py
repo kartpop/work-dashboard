@@ -9,6 +9,7 @@ from app.db import get_session
 from app.errors import ApiError
 from app.google import tasks as tasks_client
 from app.overlay import service as overlay_svc
+from app.writes import service as writes_svc
 
 router = APIRouter()
 
@@ -22,7 +23,9 @@ async def list_tasks(
     try:
         raw_lists = await tasks_client.get_task_lists()
     except Exception as exc:
-        raise ApiError(502, "google_tasks_unavailable", "Could not fetch Google Tasks.") from exc
+        raise ApiError(
+            502, "google_tasks_unavailable", "Could not fetch Google Tasks."
+        ) from exc
 
     task_lists = overlay_svc.get_merged_task_lists(
         session, raw_lists, view=view, show_completed=show_completed
@@ -52,10 +55,63 @@ async def update_overlay(
         rank=body.rank,
         group_id=body.group_id if group_id_provided else overlay_svc._UNSET,
     )
-    return {"tasklist_id": row.tasklist_id, "task_id": row.task_id, "rank": row.rank, "group_id": row.group_id}
+    return {
+        "tasklist_id": row.tasklist_id,
+        "task_id": row.task_id,
+        "rank": row.rank,
+        "group_id": row.group_id,
+    }
+
+
+# ── Google write commands (goal 4) ────────────────────────────────────────────
+
+
+class RescheduleRequest(BaseModel):
+    due_date: Optional[str] = None  # "YYYY-MM-DD" (IST bucket key) or null = NO_DATE
+    rank: Optional[float] = None
+    group_id: Optional[int] = None  # destination group, or null for standalone
+
+
+class MoveRequest(BaseModel):
+    target_list_id: str
+    rank: Optional[float] = None
+
+
+@router.post("/tasks/{tasklist_id}/{task_id}/reschedule")
+async def reschedule_task(
+    tasklist_id: str,
+    task_id: str,
+    body: RescheduleRequest,
+    session: Session = Depends(get_session),
+):
+    return await writes_svc.reschedule(
+        session,
+        tasklist_id=tasklist_id,
+        task_id=task_id,
+        due_date=body.due_date,
+        rank=body.rank,
+        group_id=body.group_id,
+    )
+
+
+@router.post("/tasks/{tasklist_id}/{task_id}/move")
+async def move_task(
+    tasklist_id: str,
+    task_id: str,
+    body: MoveRequest,
+    session: Session = Depends(get_session),
+):
+    return await writes_svc.move(
+        session,
+        tasklist_id=tasklist_id,
+        task_id=task_id,
+        target_list_id=body.target_list_id,
+        rank=body.rank,
+    )
 
 
 # ── Group CRUD ────────────────────────────────────────────────────────────────
+
 
 class GroupCreate(BaseModel):
     name: str
@@ -93,7 +149,9 @@ async def create_group(
             rank=body.rank,
         )
     except IntegrityError:
-        raise ApiError(409, "group_exists", "A group with that name already exists in this bucket.")
+        raise ApiError(
+            409, "group_exists", "A group with that name already exists in this bucket."
+        )
     return _group_response(grp)
 
 
@@ -107,7 +165,11 @@ async def update_group(
     if body.name is None and body.rank is None:
         raise ApiError(400, "no_fields", "Provide at least one of name or rank.")
     grp = overlay_svc.update_group(
-        session, group_id=group_id, tasklist_id=tasklist_id, name=body.name, rank=body.rank
+        session,
+        group_id=group_id,
+        tasklist_id=tasklist_id,
+        name=body.name,
+        rank=body.rank,
     )
     if grp is None:
         raise ApiError(404, "not_found", "Group not found.")

@@ -76,6 +76,26 @@ curl -s -X PATCH http://localhost:8010/tasks/foo/bar/overlay \
   -d '{}' | jq .
 ```
 
+### Write endpoints (goal 4 — Google writes)
+
+These mutate Google Tasks (due date + list membership). **Never fire them against a real list** —
+they go through the `verifier-writes` skill, which seeds and tears down `zz-verifier-test` lists.
+Load `verifier-writes` for the full recipe; the shapes:
+
+```bash
+# Reschedule = due-date change (POST, not PATCH). due_date is "YYYY-MM-DD" (IST) or null (NO_DATE).
+curl -s -X POST http://localhost:8010/tasks/<LISTID>/<TASKID>/reschedule \
+  -H 'Content-Type: application/json' \
+  -d '{"due_date": "2026-06-15", "rank": 1000, "group_id": null}' | jq .
+# group_id must reference a group in the DESTINATION bucket, else 422 group_wrong_bucket.
+
+# Move to another list (insert-then-delete; overlay row migrates to the new task id).
+curl -s -X POST http://localhost:8010/tasks/<LISTID>/<TASKID>/move \
+  -H 'Content-Type: application/json' \
+  -d '{"target_list_id": "<OTHERLISTID>"}' | jq .
+# Move to the current list → 400 same_list.
+```
+
 ## Frontend surface (GUI)
 
 Drive with Playwright. The origin is `http://localhost:5173`.
@@ -103,8 +123,19 @@ Key selectors:
 - `.group-name` — clickable group name (click to rename)
 - `.add-group-btn` — "+ group" affordance per bucket
 - `.panel-error` — error message (present only on fetch failure)
+- `.task-menu` — the ⋯ per-task menu trigger (goal 4: move-to-list)
+- `.task-menu-popover` — the open menu popover
+- `.move-to-list-option` — each target-list option inside the popover
+- `.toast` — write-failure toast (`role="alert"`; goal 4 — appears only when a Google write fails
+  and local state has rolled back)
 
 **No `.priority-badge` selector** — priority was removed in goal 3.
+
+**Goal-4 DnD note:** there is now ONE `<DndContext>` per task list (it spans the list's buckets), so a
+task can be dragged *between* date buckets = reschedule (one `reschedule` POST + optimistic re-bucket).
+A within-bucket drag still fires only an overlay PATCH (no Google write). Write-path verification
+(reschedule/move, failure rollback, the `.toast`) is covered by the `verifier-writes` skill against
+`zz-verifier-test` lists only.
 
 To observe PATCH/POST/DELETE requests fired by the frontend, attach a route listener:
 

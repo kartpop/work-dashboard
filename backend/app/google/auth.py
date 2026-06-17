@@ -17,8 +17,9 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
+# Changing these scopes requires re-running `uv run python -m app.google.auth`.
 SCOPES = [
-    "https://www.googleapis.com/auth/tasks.readonly",
+    "https://www.googleapis.com/auth/tasks",
     "https://www.googleapis.com/auth/calendar.readonly",
 ]
 

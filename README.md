@@ -27,6 +27,21 @@ uv run uvicorn app.main:app --reload --port 8010
 The OAuth token is persisted to the gitignored `backend/.google-tokens/token.json` and reused
 (and refreshed) on subsequent runs.
 
+> **Re-authorize for write access (goal 4):** the Tasks scope widened from `tasks.readonly` to
+> read/write `tasks` so the app can reschedule (change due dates) and move tasks between lists. A
+> token can't widen its own scope — after pulling goal 4, **delete `backend/.google-tokens/token.json`
+> and re-run `uv run python -m app.google.auth` once**. Without this, write calls return 403.
+
+### Write endpoints (goal 4)
+
+Reads remain `GET /tasks` (+ overlay PATCH / group CRUD from g2–g3). Google writes are scoped to
+due date + list membership only — rank/grouping stay overlay-only:
+
+- `POST /tasks/{list}/{task}/reschedule` `{due_date, rank, group_id?}` — set/clear the Google due
+  date (cross-bucket drag); `due_date` is `YYYY-MM-DD` (IST) or `null` for no date.
+- `POST /tasks/{list}/{task}/move` `{target_list_id}` — move to another list (insert-then-delete;
+  the overlay row migrates to the new task id).
+
 ### Frontend
 
 ```sh

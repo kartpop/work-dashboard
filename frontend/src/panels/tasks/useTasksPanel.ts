@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiDelete, apiGet, apiPatch, apiPost } from "../../api";
 
 export interface Task {
@@ -42,6 +42,7 @@ interface TasksPanelState {
   taskLists: TaskList[];
   isLoading: boolean;
   error: string | null;
+  writeError: string | null;
 }
 
 // ── Pure helpers for optimistic state transforms ──────────────────────────────
@@ -67,6 +68,124 @@ function updateBucket(
   };
 }
 
+/**
+ * Remove a task (standalone OR inside a group) from a bucket's items.
+ * If removing it empties its source group, the group is dropped — mirroring
+ * `moveTask`'s auto-remove. Returns the new items array; other rows untouched.
+ */
+function removeTaskFromItems(
+  items: BucketItem[],
+  taskId: string,
+): BucketItem[] {
+  return items
+    .map((item) => {
+      if (item.type === "task") {
+        return item.id === taskId ? null : item;
+      }
+      const idx = item.items.findIndex((t) => t.id === taskId);
+      if (idx === -1) return item;
+      const remaining = item.items.filter((t) => t.id !== taskId);
+      return remaining.length > 0 ? { ...item, items: remaining } : null;
+    })
+    .filter((it): it is BucketItem => it !== null);
+}
+
+/** Find a task anywhere in a bucket's items (standalone or nested in a group). */
+function findTaskInItems(items: BucketItem[], taskId: string): Task | null {
+  for (const item of items) {
+    if (item.type === "task" && item.id === taskId) return item;
+    if (item.type === "group") {
+      const found = item.items.find((t) => t.id === taskId);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/** Insert a task into a bucket's items, either standalone or into a group. */
+function insertTaskIntoItems(
+  items: BucketItem[],
+  task: Task,
+  destGroupId: number | null,
+  destIndex: number,
+): BucketItem[] {
+  if (destGroupId === null) {
+    const result = [...items];
+    result.splice(destIndex, 0, task);
+    return result;
+  }
+  return items.map((item) => {
+    if (item.type !== "group" || item.id !== destGroupId) return item;
+    const tasks = [...item.items];
+    tasks.splice(destIndex, 0, task);
+    return { ...item, items: tasks };
+  });
+}
+
+/**
+ * Move a task between two buckets within the same list (cross-bucket reschedule).
+ * Removes from the source bucket (with group auto-remove), updates its fields,
+ * and inserts into the destination bucket at destIndex.
+ */
+function moveTaskAcrossBuckets(
+  state: TasksPanelState,
+  tasklistId: string,
+  taskId: string,
+  fromBucketKey: string,
+  toBucketKey: string,
+  updatedTask: Task,
+  destGroupId: number | null,
+  destIndex: number,
+): TasksPanelState {
+  return {
+    ...state,
+    taskLists: state.taskLists.map((list) => {
+      if (list.id !== tasklistId) return list;
+      return {
+        ...list,
+        buckets: list.buckets.map((b) => {
+          if (b.key === fromBucketKey) {
+            return { ...b, items: removeTaskFromItems(b.items, taskId) };
+          }
+          if (b.key === toBucketKey) {
+            return {
+              ...b,
+              items: insertTaskIntoItems(
+                b.items,
+                updatedTask,
+                destGroupId,
+                destIndex,
+              ),
+            };
+          }
+          return b;
+        }),
+      };
+    }),
+  };
+}
+
+/** Remove a task from a whole list (any bucket / group), with group auto-remove. */
+function removeTaskFromList(
+  state: TasksPanelState,
+  tasklistId: string,
+  taskId: string,
+): TasksPanelState {
+  return {
+    ...state,
+    taskLists: state.taskLists.map((list) => {
+      if (list.id !== tasklistId) return list;
+      return {
+        ...list,
+        buckets: list.buckets.map((b) => ({
+          ...b,
+          items: removeTaskFromItems(b.items, taskId),
+        })),
+      };
+    }),
+  };
+}
+
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useTasksPanel() {
@@ -74,30 +193,53 @@ export function useTasksPanel() {
     taskLists: [],
     isLoading: true,
     error: null,
+    writeError: null,
   });
 
-  const load = useCallback(() => {
-    setState((s) => ({ ...s, isLoading: true, error: null }));
+  // Holds the pre-op snapshot of taskLists, captured inside a setState updater
+  // so it reflects the latest committed state before an optimistic mutation.
+  const snapshotRef = useRef<TaskList[] | null>(null);
+
+  // Initial load. The fetch is async (setState fires in its callbacks, not
+  // synchronously in the effect body), and initial state is already
+  // `isLoading: true`, so there is no synchronous setState in the effect.
+  useEffect(() => {
     let cancelled = false;
     apiGet<TasksResponse>("/tasks?view=grouped")
       .then((data) => {
         if (!cancelled)
-          setState({
+          setState((s) => ({
+            ...s,
             taskLists: data.task_lists,
             isLoading: false,
             error: null,
-          });
+          }));
       })
       .catch((err: Error) => {
         if (!cancelled)
-          setState({ taskLists: [], isLoading: false, error: err.message });
+          setState((s) => ({
+            ...s,
+            taskLists: [],
+            isLoading: false,
+            error: err.message,
+          }));
       });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  useEffect(load, [load]);
+  // Refetch task lists WITHOUT flipping isLoading (no spinner flash). Used after
+  // a cross-list move so the moved task appears in its destination, correctly
+  // bucketed, with the server-assigned new task id.
+  const refetchSilently = useCallback(async () => {
+    const data = await apiGet<TasksResponse>("/tasks?view=grouped");
+    setState((s) => ({ ...s, taskLists: data.task_lists }));
+  }, []);
+
+  const dismissWriteError = useCallback(() => {
+    setState((s) => ({ ...s, writeError: null }));
+  }, []);
 
   // Reorder a task within its current container (same group or same standalone zone).
   // Rank is pre-computed by the component.
@@ -300,6 +442,99 @@ export function useTasksPanel() {
     [],
   );
 
+  // ── Google writes (snapshot + optimistic + POST + rollback + toast) ─────────
+
+  // Cross-bucket drag = reschedule. Moves a task to another date-bucket in the
+  // same list: due-date change + group-aware drop + overlay rank. Optimistic
+  // across TWO buckets; one POST; snapshot-rollback + toast on failure.
+  const rescheduleTask = useCallback(
+    (
+      listId: string,
+      taskId: string,
+      fromBucketKey: string,
+      toBucketKey: string,
+      dueDate: string | null,
+      destGroupId: number | null,
+      destIndex: number,
+      newRank: number,
+    ) => {
+      setState((prev) => {
+        // Snapshot BEFORE applying the optimistic update.
+        snapshotRef.current = prev.taskLists;
+
+        const list = prev.taskLists.find((l) => l.id === listId);
+        if (!list) return prev;
+        const fromBucket = list.buckets.find((b) => b.key === fromBucketKey);
+        if (!fromBucket) return prev;
+        const original = findTaskInItems(fromBucket.items, taskId);
+        if (!original) return prev;
+
+        const updatedTask: Task = {
+          ...original,
+          due: dueDate ? `${dueDate}T00:00:00.000Z` : null,
+          group_id: destGroupId,
+          rank: newRank,
+        };
+
+        return moveTaskAcrossBuckets(
+          prev,
+          listId,
+          taskId,
+          fromBucketKey,
+          toBucketKey,
+          updatedTask,
+          destGroupId,
+          destIndex,
+        );
+      });
+
+      apiPost(`/tasks/${listId}/${taskId}/reschedule`, {
+        due_date: dueDate,
+        rank: newRank,
+        group_id: destGroupId,
+      }).catch((err: Error) => {
+        const snapshot = snapshotRef.current;
+        setState((s) => ({
+          ...s,
+          taskLists: snapshot ?? s.taskLists,
+          writeError: `Reschedule failed: ${err.message}`,
+        }));
+      });
+    },
+    [],
+  );
+
+  // Move a task to another list via the menu (insert + delete on the backend).
+  // Optimistically remove it here; on success silently refetch so it appears
+  // in the target list correctly bucketed. Rollback + toast on failure.
+  const moveTaskToList = useCallback(
+    (listId: string, taskId: string, targetListId: string) => {
+      setState((prev) => {
+        snapshotRef.current = prev.taskLists;
+        return removeTaskFromList(prev, listId, taskId);
+      });
+
+      apiPost(`/tasks/${listId}/${taskId}/move`, {
+        target_list_id: targetListId,
+      })
+        .then(() => {
+          // Move succeeded server-side. Silently refetch so the moved task
+          // shows in its destination. A refetch failure is NOT a move rollback
+          // (the task already moved) — swallow it; next load will reconcile.
+          refetchSilently().catch(() => {});
+        })
+        .catch((err: Error) => {
+          const snapshot = snapshotRef.current;
+          setState((s) => ({
+            ...s,
+            taskLists: snapshot ?? s.taskLists,
+            writeError: `Move failed: ${err.message}`,
+          }));
+        });
+    },
+    [refetchSilently],
+  );
+
   return {
     ...state,
     reorderTask,
@@ -308,5 +543,8 @@ export function useTasksPanel() {
     createGroup,
     renameGroup,
     deleteGroup,
+    rescheduleTask,
+    moveTaskToList,
+    dismissWriteError,
   };
 }

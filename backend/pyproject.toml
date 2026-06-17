@@ -23,4 +23,6 @@ packages = ["app"]
 [dependency-groups]
 dev = [
     "ruff>=0.15.16",
+    "pytest>=8.0",
+    "httpx>=0.27",
 ]

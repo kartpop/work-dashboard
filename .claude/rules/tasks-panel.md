@@ -38,6 +38,52 @@ receives the pre-computed `newRank` and simply applies it. Never compute ranks i
 
 ---
 
+## Goal 4 — cross-bucket reschedule & move-to-list (first Google writes)
+
+### One DndContext per LIST (was: per bucket)
+To drag a task *between* date-buckets, the `<DndContext>` moved up from `BucketSection` to
+`TaskListSection` — it now wraps every bucket of one list. Each bucket keeps its own
+`<SortableContext>`; sortable ids (`task.id`, `group-{id}`) are globally unique so they don't
+collide across buckets in the shared context. Each bucket's `<ul>` is also a
+`useDroppable({ id: "bucket:"+bucket.key })` (class `.bucket-droppable`, min-height) so a drop in
+a bucket's open area resolves to that bucket even when it has no item under the pointer.
+Cross-**list** drag is still unsupported (each list is its own DndContext) — moving between lists
+is the menu's job, not drag.
+
+### `handleDragEnd` now lives at list level
+1. `findBucketForId(buckets, activeId)` → source bucket; the dest bucket comes from `overId`
+   (`bucket:{key}` → by key, else `findBucketForId(overId)`).
+2. **Group drag:** groups never span buckets — if dest bucket ≠ source bucket, `return`; else the
+   g3 group-reorder runs (with `bucket:` open-area resolving to the bucket end).
+3. **Task drag, dest bucket ≠ source bucket → RESCHEDULE branch:**
+   - `dueDate = destBucket.key === "NO_DATE" ? null : destBucket.key`.
+   - **Destination group resolution:** drop on a `group-{id}` header or on a task nested in a dest
+     group → `destGroupId = that group`; drop on the bucket open area or a standalone task →
+     `destGroupId = null`. (Same rule as a within-bucket drop, just evaluated in the dest bucket.)
+   - `destIndex` + `newRank` are computed against the **destination** container with the task
+     hypothetically inserted (`computeGroupTaskRank` for a dest group, `computeMidpointRank` for the
+     dest bucket) — identical math to g3, different container.
+   - Calls `rescheduleTask(...)`.
+4. **Task drag, same bucket → unchanged g3 paths** (reorder / move-into-group / ungroup), overlay
+   PATCH only, no Google write. All five bug-fixes below still apply.
+
+### Snapshot-rollback pattern (Google writes are NOT fire-and-forget)
+Unlike overlay PATCHes (optimistic, errors swallowed), `rescheduleTask` and `moveTaskToList`:
+- capture `snapshotRef.current = prev.taskLists` **inside** the `setState` updater (so it's the
+  latest committed state) *before* applying the optimistic transform;
+- fire exactly one `apiPost`;
+- on `.catch`, restore `taskLists` from the snapshot **and** set `writeError` (the `.toast`). Never
+  swallow a Google-write error.
+`rescheduleTask` moves the row across two buckets in one transform (`moveTaskAcrossBuckets`):
+remove from source (with the same group auto-remove as `moveTask` — an emptied source group is
+dropped from local state), set `due`/`group_id`/`rank`, insert into the dest bucket at `destIndex`.
+`moveTaskToList` optimistically removes the task from the source list, POSTs, then on success
+**silently refetches** (`refetchSilently`, no `isLoading` flip) so the task reappears in its
+destination correctly bucketed with the server's new task id; a refetch failure is swallowed (the
+move already happened server-side) — only a *move* failure rolls back.
+
+---
+
 ## Bug log — what broke, why, and what fixed it
 
 ### 1. Groups can only be dragged once
