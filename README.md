@@ -14,8 +14,7 @@ see [docs/api-reference.md](docs/api-reference.md); for the milestone history, s
 
 ## Prerequisites
 
-- A Google Cloud OAuth client secret at `client_secret.json` in the repo root (not committed —
-  ask whoever set up the Google Cloud project for a copy).
+- A Google Cloud OAuth client secret at `client_secret.json` in the repo root.
 - An `ANTHROPIC_API_KEY` in the backend environment if you want the scratchpad auto-router to
   classify captures. Without it, captures fall through to the manual review queue (no Google
   writes) — everything else works fine.
