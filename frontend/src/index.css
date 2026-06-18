@@ -690,3 +690,146 @@ h1, h2, h3 {
 .add-task-cancel:hover {
   color: var(--done);
 }
+
+/* ── Scratchpad + review queue (goal 5) ──────────────────────── */
+
+.capture-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.capture-input {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-sizing: border-box;
+}
+
+.capture-submit {
+  align-self: flex-end;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--accent, #2563eb);
+  color: #fff;
+  cursor: pointer;
+}
+
+.capture-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.scratch-entries li,
+.review-list li {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.scratch-entries li {
+  flex-direction: row;
+  align-items: center;
+}
+
+.scratch-text {
+  flex: 1;
+}
+
+.scratch-badge {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--done);
+  white-space: nowrap;
+}
+
+.scratch-badge.state-routed_task {
+  color: #047857;
+  border-color: #047857;
+}
+
+.scratch-badge.state-in_review {
+  color: #b45309;
+  border-color: #b45309;
+}
+
+.scratch-badge.state-unrouted {
+  color: var(--done);
+}
+
+.review-item {
+  background: rgba(180, 83, 9, 0.06);
+  border: 1px solid rgba(180, 83, 9, 0.3) !important;
+  border-radius: 6px;
+  padding: 8px 10px !important;
+  margin-bottom: 8px;
+}
+
+.review-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.review-entry-text {
+  font-weight: 500;
+}
+
+.review-conf {
+  flex-shrink: 0;
+  color: #b45309;
+  font-size: 13px;
+}
+
+.review-reason {
+  margin: 2px 0 6px;
+  font-size: 13px;
+  color: var(--done);
+}
+
+.review-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.review-fields input,
+.review-fields select {
+  font: inherit;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.review-fields label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.review-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.review-actions button {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.review-dismiss {
+  color: var(--done);
+}

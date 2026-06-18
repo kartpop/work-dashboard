@@ -1,0 +1,32 @@
+{"text": "call the dentist friday", "destination": "task", "title_contains": "dentist", "expects_due": true}
+{"text": "buy milk and eggs", "destination": "task", "title_contains": "milk"}
+{"text": "email Sam the Q3 deck", "destination": "task", "title_contains": "sam"}
+{"text": "submit the reimbursement form tomorrow", "destination": "task", "expects_due": true}
+{"text": "renew car insurance by next monday", "destination": "task", "expects_due": true}
+{"text": "pick up dry cleaning", "destination": "task", "title_contains": "dry cleaning"}
+{"text": "#followups ping Ravi about the contract", "destination": "task", "list_hint_contains": "followups"}
+{"text": "book flights for the Goa trip", "destination": "task", "title_contains": "flight"}
+{"text": "review the PR from Anita", "destination": "task", "title_contains": "pr"}
+{"text": "pay the electricity bill on the 28th", "destination": "task", "expects_due": true}
+{"text": "remember the Vsauce video on entropy", "destination": "note"}
+{"text": "idea: a CLI that summarizes my git history", "destination": "note"}
+{"text": "the book Tejas recommended was Sapiens", "destination": "note"}
+{"text": "favorite coffee place near the office is Blue Tokai", "destination": "note"}
+{"text": "interesting analogy: rust's borrow checker is like library book loans", "destination": "note"}
+{"text": "the conference wifi password is sunflower42", "destination": "note"}
+{"text": "quote I liked: the obstacle is the way", "destination": "note"}
+{"text": "lunch with Tejas thursday 1pm", "destination": "event"}
+{"text": "standup moved to 10am tomorrow", "destination": "event"}
+{"text": "1:1 with my manager friday 3pm", "destination": "event"}
+{"text": "team offsite next wednesday all day", "destination": "event"}
+{"text": "dinner with parents sunday 8pm", "destination": "event"}
+{"text": "call with the vendor monday 11am about pricing", "destination": "event"}
+{"text": "the thing from earlier", "destination": "unknown", "ambiguous": true}
+{"text": "Tejas?", "destination": "unknown", "ambiguous": true}
+{"text": "asdf qwer zxcv", "destination": "unknown", "ambiguous": true}
+{"text": "maybe later", "destination": "unknown", "ambiguous": true}
+{"text": "groceries", "destination": "task", "title_contains": "grocer"}
+{"text": "lunch tomorrow", "destination": "event", "ambiguous": true}
+{"text": "entropy", "destination": "unknown", "ambiguous": true}
+{"text": "finish the slides for monday's review and send to the team", "destination": "task", "expects_due": true, "title_contains": "slides"}
+{"text": "coffee with Priya wednesday 4pm at Third Wave", "destination": "event"}

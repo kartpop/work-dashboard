@@ -10,6 +10,7 @@ from alembic import context
 
 # import models so SQLModel.metadata is populated
 import app.overlay.models  # noqa: F401
+import app.router.models  # noqa: F401
 
 config = context.config
 

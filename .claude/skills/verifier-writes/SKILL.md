@@ -163,3 +163,34 @@ PY
 Also delete any overlay rows / groups created against the `zz-` list ids if they linger
 (`DELETE /tasks/<zzlist>/groups/<id>`). Never delete tasks whose title does not start with `vt-`, and
 never touch a list whose title does not start with `zz-verifier-test`.
+
+## 6. Router write-path checks (goal 5)
+
+The auto-router (`app.router`) is the only runtime LLM and its Google-write surface is **create-only**
+(`create_task` + `reschedule` for the date; never `delete_task` / status-complete / `update_content`).
+Two things to verify — one needs no API key, one does.
+
+**6a. Create-only guardrail (no API key, no Google needed).** This is the gate-critical safety check —
+prove routing can never reach a destructive writer. The pytest suite asserts it directly:
+```bash
+cd backend && uv run pytest tests/test_router.py -q
+```
+Confirm the test `test_router_never_calls_delete_or_status` (and friends) passes — it drives every
+routing path against recorded `app.google.tasks` stubs and asserts `delete_task` / status-complete are
+**never** called and that a routed task fires exactly one `create_task`.
+
+**6b. Live routing against a zz- list (needs `ANTHROPIC_API_KEY` + write scope).** Point the default
+list resolution at a throwaway list. Capture a clearly-a-task thought, route it, and confirm exactly
+one task appears in the `zz-` list with the right due date — and that **no** delete/complete fired:
+```bash
+# capture → route-now → confirm in Google (use the zz- list as the first/default list, or pass a #hint)
+curl -s -X POST localhost:8010/scratch -H 'Content-Type: application/json' \
+  -d '{"text": "vt-router call the plumber friday #zz-verifier-test"}' | jq .
+curl -s -X POST localhost:8010/scratch/route-now | jq .          # tally → routed_task: 1
+# then dump the zz- list (step 3 recipe) — exactly one new vt-router task, due ~friday, no dupes
+```
+Clean up the created `vt-router*` task with the step-5 recipe. A low-confidence / `event` / `note`
+capture must land in `GET /review` with **zero** Google writes — verify the tally shows `in_review`
+and the list is unchanged. **The eval harness (`/eval`), not the verifier, is g5's headline
+verification surface** — the probabilistic classifier needs eval-based scoring; this skill only covers
+the deterministic write-path safety.

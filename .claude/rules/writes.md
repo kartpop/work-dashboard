@@ -45,6 +45,15 @@ patch body.
   (`writes.service.delete`). No other code path may call it. In move, if the delete fails *after*
   a successful insert, do **not** retry-delete blindly — surface the duplicate to the caller (the
   task now exists in both lists; losing it is worse than a visible duplicate).
+  **The goal-5 auto-router is NOT a third `delete_task` caller** — its write path is create-only
+  (next bullet).
+- **`create_task` has TWO sanctioned callers (goal 5):** (1) the **user create endpoint**
+  (`POST /tasks/{list}`); (2) the **auto-router** (`app.router.service`), which creates a task from a
+  routed capture. The router's *entire* Google-write surface is **`create_task` + `reschedule`** (the
+  g4a date path, to set the new task's due date) — both create/metadata, nothing destructive. Routing
+  may **never** call `delete_task`, the complete/uncomplete `status` write, or `update_content`. This
+  create-only contract lives in `.claude/rules/router.md` and is asserted by a router write-path test
+  (the router's write dependency set is exactly `{create_task, reschedule}`).
 - **Completion writes immediately; delete defers (g4a).** Completion (`status` patch) is
   non-destructive — Google retains completed tasks and uncomplete is cheap — so the write fires
   now; the undo-toast is mis-click recovery. **Delete is the only genuinely irreversible op**, so

@@ -6,13 +6,18 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.db import create_tables
-from app.routers import calendar, tasks
+from app.router import scheduler as router_scheduler
+from app.routers import calendar, scratch, tasks
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     create_tables()
-    yield
+    router_scheduler.start()
+    try:
+        yield
+    finally:
+        await router_scheduler.stop()
 
 
 app = FastAPI(title="Work Dashboard API", lifespan=lifespan)
@@ -35,3 +40,4 @@ async def http_exception_handler(request, exc: StarletteHTTPException):
 
 app.include_router(tasks.router)
 app.include_router(calendar.router)
+app.include_router(scratch.router)
