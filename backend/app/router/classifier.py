@@ -12,6 +12,7 @@ paths talk to Google directly — no MCP, no agent loop.
 
 from __future__ import annotations
 
+import logging
 import zoneinfo
 from datetime import datetime
 
@@ -19,6 +20,8 @@ import anthropic
 
 from app.router import config
 from app.router.schema import RouterClassification, unknown_classification
+
+_log = logging.getLogger("router.classifier")
 
 _IST = zoneinfo.ZoneInfo("Asia/Kolkata")
 
@@ -70,5 +73,8 @@ async def classify(text: str) -> RouterClassification:
         result.confidence = max(0.0, min(1.0, result.confidence))
         return result
     except Exception:
-        # Model error, auth error, network error — never crash the pipeline.
+        # Model error, auth error, network error — never crash the pipeline. Log
+        # it, though: silently collapsing to `unknown` otherwise hides a misconfig
+        # (e.g. a missing ANTHROPIC_API_KEY) as "every capture is unclassifiable".
+        _log.exception("classifier call failed; routing to unknown")
         return unknown_classification()

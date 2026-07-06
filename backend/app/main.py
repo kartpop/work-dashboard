@@ -1,13 +1,20 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
+from dotenv import load_dotenv
 
-from app.db import create_tables
-from app.router import scheduler as router_scheduler
-from app.routers import calendar, scratch, tasks
+# Load backend/.env before importing any app module that reads env at import time
+# (e.g. app.router.config) or at call time (the classifier's ANTHROPIC_API_KEY).
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
+
+from app.db import create_tables  # noqa: E402
+from app.router import scheduler as router_scheduler  # noqa: E402
+from app.routers import calendar, scratch, tasks  # noqa: E402
 
 
 @asynccontextmanager

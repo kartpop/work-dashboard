@@ -1,9 +1,12 @@
+import logging
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
+
+logger = logging.getLogger(__name__)
 
 from app.db import get_session
 from app.errors import ApiError
@@ -23,6 +26,7 @@ async def list_tasks(
     try:
         raw_lists = await tasks_client.get_task_lists()
     except Exception as exc:
+        logger.exception("Google Tasks fetch failed: %s", exc)
         raise ApiError(
             502, "google_tasks_unavailable", "Could not fetch Google Tasks."
         ) from exc

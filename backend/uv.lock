@@ -1495,6 +1495,7 @@ dependencies = [
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-oauthlib" },
+    { name = "python-dotenv" },
     { name = "sqlmodel" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1514,6 +1515,7 @@ requires-dist = [
     { name = "google-api-python-client", specifier = ">=2.140" },
     { name = "google-auth", specifier = ">=2.35" },
     { name = "google-auth-oauthlib", specifier = ">=1.2" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "sqlmodel", specifier = ">=0.0.22" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
