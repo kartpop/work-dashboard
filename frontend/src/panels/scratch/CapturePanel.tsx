@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ReviewFields } from "./useScratchPanel";
 import { useScratchPanel } from "./useScratchPanel";
 import { ReviewQueue } from "./ReviewPanel";
 
@@ -10,7 +11,9 @@ const STATE_LABEL: Record<string, string> = {
   resolved: "Resolved",
 };
 
-export function CapturePanel() {
+// `onRouted` lets the (separately-owned) Tasks panel refresh when routing or a
+// review confirmation created a Google task — the panels share no state.
+export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
   const scratch = useScratchPanel();
   const [text, setText] = useState("");
 
@@ -22,13 +25,28 @@ export function CapturePanel() {
     setText("");
   };
 
+  const routeNow = () => {
+    scratch.routeNow().then((created) => {
+      if (created) onRouted?.();
+    });
+  };
+
+  const confirmItem = async (
+    itemId: number,
+    override?: { destination?: string; fields?: ReviewFields },
+  ) => {
+    const created = await scratch.confirmItem(itemId, override);
+    if (created) onRouted?.();
+    return created;
+  };
+
   return (
     <section className="panel">
       <div className="panel-head">
         <h2>Scratchpad</h2>
         <button
           className="panel-refresh"
-          onClick={scratch.routeNow}
+          onClick={routeNow}
           disabled={scratch.busy}
           title="Route all unrouted entries now"
         >
@@ -60,7 +78,7 @@ export function CapturePanel() {
 
       <ReviewQueue
         items={scratch.reviewItems}
-        onConfirm={scratch.confirmItem}
+        onConfirm={confirmItem}
         onDismiss={scratch.dismissItem}
       />
 

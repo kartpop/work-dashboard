@@ -8,7 +8,7 @@ interface Props {
   onConfirm: (
     id: number,
     override?: { destination?: string; fields?: ReviewFields },
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   onDismiss: (id: number) => Promise<void>;
 }
 

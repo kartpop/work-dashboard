@@ -24,6 +24,11 @@ export interface ActionToast {
 
 const ACTION_TOAST_MS = 5000;
 
+// Poll so the backend router scheduler's newly-created tasks (and phone-app
+// edits) surface without a manual refresh. Silent refetch; paused while an
+// undo-toast window is open (see the polling effect).
+const POLL_MS = 45_000;
+
 export interface Group {
   type: "group";
   id: number;
@@ -461,6 +466,18 @@ export function useTasksPanel() {
   // Flush any pending deferred action when the panel unmounts (don't orphan a
   // delete that the user neither undid nor waited out).
   useEffect(() => () => commitPending(), [commitPending]);
+
+  // Periodic silent refetch so scheduler-created tasks appear on their own. A
+  // tick is SKIPPED while an undo-toast window is open: a deferred delete holds
+  // its Google DELETE until the window closes, so a refetch then would fetch the
+  // still-present task and briefly resurrect it under the toast.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (toastTimerRef.current !== null) return;
+      refetchSilently().catch(() => {});
+    }, POLL_MS);
+    return () => window.clearInterval(id);
+  }, [refetchSilently]);
 
   // Manual per-panel refresh (re-run GET /tasks) — surfaces phone-app changes
   // and a recurring task's next instance after completion.

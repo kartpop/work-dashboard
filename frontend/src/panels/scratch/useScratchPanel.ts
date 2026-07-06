@@ -37,6 +37,10 @@ interface ReviewResponse {
   items: Array<Omit<ReviewItem, "fields"> & { fields: string }>;
 }
 
+// The backend router scheduler routes unrouted captures on its own (~5 min).
+// Poll so those state changes surface without a manual page refresh.
+const POLL_MS = 45_000;
+
 export function useScratchPanel() {
   const [entries, setEntries] = useState<ScratchEntry[]>([]);
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
@@ -75,6 +79,14 @@ export function useScratchPanel() {
     };
   }, [load]);
 
+  // Poll so the backend scheduler's routing is reflected without a manual refresh.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      load().catch(() => {});
+    }, POLL_MS);
+    return () => window.clearInterval(id);
+  }, [load]);
+
   // Append a capture. Optimistic prepend, then reconcile from the server response.
   const capture = useCallback(async (text: string) => {
     const trimmed = text.trim();
@@ -84,25 +96,38 @@ export function useScratchPanel() {
   }, []);
 
   // Manual "route now" — same code path as the scheduled job. Reload after.
-  const routeNow = useCallback(async () => {
+  // Returns whether any entry was routed to a Google task, so the caller can
+  // refresh the (separately-owned) Tasks panel only when there's something new.
+  const routeNow = useCallback(async (): Promise<boolean> => {
     setBusy(true);
     try {
-      await apiPost("/scratch/route-now", {});
+      const { tally } = await apiPost<{ tally: Record<string, number> }>(
+        "/scratch/route-now",
+        {},
+      );
       await load();
+      return (tally.routed_task ?? 0) > 0;
     } catch (err) {
       setError(`Route failed: ${(err as Error).message}`);
+      return false;
     } finally {
       setBusy(false);
     }
   }, [load]);
 
+  // Confirm a review item; returns true when the confirmation created a Google
+  // task (entry_state "routed_task"), so the caller can refresh the Tasks panel.
   const confirmItem = useCallback(
     async (
       itemId: number,
       override?: { destination?: string; fields?: ReviewFields },
-    ) => {
-      await apiPost(`/review/${itemId}/confirm`, override ?? {});
+    ): Promise<boolean> => {
+      const { entry_state } = await apiPost<{ entry_state: string }>(
+        `/review/${itemId}/confirm`,
+        override ?? {},
+      );
       await load();
+      return entry_state === "routed_task";
     },
     [load],
   );

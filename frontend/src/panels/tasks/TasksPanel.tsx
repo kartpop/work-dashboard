@@ -1076,7 +1076,11 @@ function TaskListSection({
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
-export function TasksPanel() {
+export function TasksPanel({
+  tasks,
+}: {
+  tasks: ReturnType<typeof useTasksPanel>;
+}) {
   const {
     taskLists,
     isLoading,
@@ -1100,7 +1104,7 @@ export function TasksPanel() {
     renameList,
     refresh,
     undoActionToast,
-  } = useTasksPanel();
+  } = tasks;
 
   // Auto-dismiss the error toast after ~4s. (The action toast self-expires in
   // the hook after ~5s, committing any deferred write.)

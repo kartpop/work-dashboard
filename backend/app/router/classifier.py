@@ -32,9 +32,10 @@ and extract — you never take any action.
 Destinations:
 - "task": an actionable to-do ("call the dentist friday", "buy milk", "email Sam the deck").
   Extract: title (imperative, concise), list_hint (only if the user named a list, e.g. \
-"#followups" or "work list"; else null), due_date (resolve relative dates like "friday", \
-"tomorrow", "next monday" to YYYY-MM-DD in IST using TODAY below; else null), notes (any \
-trailing detail; else null).
+"#followups" or "work list"; else null), due_date (resolve relative dates to YYYY-MM-DD in \
+IST using TODAY below; else null. "tomorrow" = TODAY + 1 day; "day after" / "day after \
+tomorrow" = TODAY + 2 days; also handle named weekdays like "friday" and "next monday"), \
+notes (any trailing detail; else null).
 - "note": a thought to remember, not an action ("remember the Vsauce video on entropy", \
 "idea: a CLI for X"). Extract: note_text (the cleaned thought).
 - "event": something with other people at a specific time ("lunch with Tejas thursday 1pm", \
