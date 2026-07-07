@@ -16,7 +16,7 @@ paths: ["frontend/**"]
   panel hook.
 - **MVP layout (goal 6):** `DashboardPage` renders `PinnedTasksRow` (the full-width top row) then
   `OtherTasksSection` (collapsed, ephemeral state) and the calendar. `PinnedTasksRow` owns ONE
-  resizable grid holding all three top-row columns — My Tasks | Follow-up (the pinned pair, under
+  resizable grid holding all three top-row columns — My Tasks | Follow-ups (the pinned pair, under
   one shared `DndContext` for cross-list drag) + the scratchpad. The scratchpad is passed in as a
   `scratchpad` **prop** (a `<CapturePanel>` node built by `DashboardPage`) so `TasksPanel.tsx`
   imports no sibling panel. `DndListGroup` is now **children-based** (owns sensors + `handleDragEnd`

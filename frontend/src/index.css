@@ -51,7 +51,7 @@ h1, h2, h3 {
 
 /* ── Goal 6 layout: resizable top row + collapsed Other tasks ──────────────── */
 
-/* My Tasks | Follow-up | Scratchpad in ONE grid: three flexible columns (default
+/* My Tasks | Follow-ups | Scratchpad in ONE grid: three flexible columns (default
    30/30/40, from the --w* vars set inline) with a draggable handle between each
    adjacent pair. Handles are fixed-width gutters — no extra `gap`. */
 .top-row-resizable {
@@ -114,7 +114,7 @@ h1, h2, h3 {
   min-height: 120px;
 }
 
-/* Pinned columns (My Tasks / Follow-up) hide the per-row date text — the bucket
+/* Pinned columns (My Tasks / Follow-ups) hide the per-row date text — the bucket
    header already carries the date — keeping only the calendar-picker icon so a
    click still opens the date picker. WebKit/Chromium pseudo-elements. */
 .task-column--compact-dates .task-date {

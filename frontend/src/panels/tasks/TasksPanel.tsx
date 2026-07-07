@@ -648,7 +648,7 @@ function TaskListColumn({
   list: TaskList;
   allLists: ListRef[];
   tasks: TasksHook;
-  // Pinned columns (My Tasks / Follow-up) hide the per-row date — the bucket is
+  // Pinned columns (My Tasks / Follow-ups) hide the per-row date — the bucket is
   // already the date — keeping only the calendar-picker icon (see CSS).
   compactDates?: boolean;
 }) {
@@ -1168,14 +1168,14 @@ function DndListGroup({
 // The two lists that fill the full-width top row, matched by title against the
 // live Google lists at load. Static in code (no ui_prefs / visibility chooser
 // yet — deferred). A title missing from Google renders an empty-column hint.
-export const PINNED_LIST_TITLES = ["My Tasks", "Follow-up"];
+export const PINNED_LIST_TITLES = ["My Tasks", "Follow-ups"];
 
 function allListRefs(taskLists: TaskList[]): ListRef[] {
   return taskLists.map((l) => ({ id: l.id, title: l.title }));
 }
 
 // ── Resizable top row (goal 6a) ───────────────────────────────────────────────
-// The three columns (My Tasks | Follow-up | Scratchpad) live in ONE grid with a
+// The three columns (My Tasks | Follow-ups | Scratchpad) live in ONE grid with a
 // draggable handle between each adjacent pair, so each column can be squished or
 // widened independently. Column widths are `fr` fractions (default 30/30/40) held
 // in ephemeral state — no persistence yet (ui_prefs is deferred to goal 9). Below
@@ -1204,7 +1204,7 @@ function ResizeHandle({
 }
 
 /**
- * The full-width top row: the pinned pair (My Tasks | Follow-up) under ONE shared
+ * The full-width top row: the pinned pair (My Tasks | Follow-ups) under ONE shared
  * DndContext so a task can be dragged between them, plus the scratchpad as the
  * third column — all in a single resizable grid. A missing pinned title degrades
  * to an empty-column hint without affecting the other columns. The scratchpad is
