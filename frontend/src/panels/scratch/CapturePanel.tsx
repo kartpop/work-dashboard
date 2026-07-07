@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import type { ReviewFields, ScratchEntry } from "./useScratchPanel";
 import { useScratchPanel } from "./useScratchPanel";
 import { ReviewQueue } from "./ReviewPanel";
@@ -43,6 +44,42 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
   // A bullet keystroke sets both value and caret; the textarea is controlled, so
   // stash the desired selection and re-apply it once React has flushed the value.
   const pendingSel = useRef<{ start: number; end: number } | null>(null);
+
+  // ── Editor/Recent split resize (goal 7a) ───────────────────────────────────
+  // The editor and recent sections share space; dragging the handle between them
+  // adjusts the split. Stored as a CSS custom property on the capture-panel.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [isResizing, setIsResizing] = useState(false);
+
+  const handleResizeStart = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!panelRef.current) return;
+      const panel = panelRef.current;
+      const rect = panel.getBoundingClientRect();
+      // Dragging down increases editor, up decreases editor
+      const offset = e.clientY - rect.top;
+      const ratio = Math.max(0.5, Math.min(0.75, offset / rect.height));
+      panel.style.setProperty("--editor-ratio", ratio.toString());
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isResizing]);
 
   useLayoutEffect(() => {
     if (pendingSel.current && taRef.current) {
@@ -196,7 +233,7 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
   ];
 
   return (
-    <section className="panel capture-panel">
+    <section className="panel capture-panel" ref={panelRef}>
       <div className="panel-head">
         <h2>Scratchpad</h2>
         <button
@@ -245,6 +282,15 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
         onDismiss={scratch.dismissItem}
       />
 
+      <div
+        className="scratch-resize-handle"
+        onMouseDown={handleResizeStart}
+        role="separator"
+        aria-label="Resize editor and recent sections"
+      >
+        <div className="scratch-resize-bar" />
+      </div>
+
       <div className="scratch-recent">
         <h3>Recent</h3>
         {scratch.isLoading ? (
@@ -265,14 +311,16 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
         )}
       </div>
 
-      {showUndo && (
-        <div className="toast toast--action toast--capture" role="status">
-          <span>Captured — filing in a moment…</span>
-          <button className="toast-undo" onClick={undoCapture}>
-            Undo
-          </button>
-        </div>
-      )}
+      {showUndo &&
+        createPortal(
+          <div className="toast toast--action toast--capture" role="status">
+            <span>Captured — filing in a moment…</span>
+            <button className="toast-undo" onClick={undoCapture}>
+              Undo
+            </button>
+          </div>,
+          document.body,
+        )}
     </section>
   );
 }

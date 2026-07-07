@@ -53,11 +53,12 @@ h1, h2, h3 {
 
 /* My Tasks | Follow-ups | Scratchpad in ONE grid: three flexible columns (default
    30/30/40, from the --w* vars set inline) with a draggable handle between each
-   adjacent pair. Handles are fixed-width gutters — no extra `gap`. */
+   adjacent pair. Handles are fixed-width gutters — no extra `gap`. All panels
+   stretch to the same height. */
 .top-row-resizable {
   display: grid;
   grid-template-columns: var(--w0) var(--handle) var(--w1) var(--handle) var(--w2);
-  align-items: start;
+  align-items: stretch;
   margin-bottom: 24px;
 }
 
@@ -95,13 +96,8 @@ h1, h2, h3 {
   width: 2px;
   margin: 10px 0;
   border-radius: 2px;
-  background: var(--border);
+  background: transparent;
   transition: background 0.12s ease;
-}
-
-.resize-handle:hover .resize-handle-bar,
-.resize-handle:active .resize-handle-bar {
-  background: var(--done);
 }
 
 /* A pinned column and the scratchpad share the same card footprint. */
@@ -976,22 +972,27 @@ h1, h2, h3 {
   overflow-y: auto;
 }
 
-/* Scratchpad: the editor takes ~60% of the column by default (min ~10 rows) and
-   RECENT scrolls in the remainder with its own scrollbar. */
+/* Scratchpad: the editor grows to take the larger share (~60% default) of the column
+   and RECENT scrolls in the remainder with its own scrollbar. The split is controlled
+   via --editor-ratio custom property (dragged via the resize handle). */
+.capture-panel {
+  --editor-ratio: 0.6;
+}
+
 .capture-panel .capture-form {
-  flex: 1 1 60%;
+  flex: calc(var(--editor-ratio) * 1000) 1 0;
   min-height: 0;
 }
 
 .capture-panel .capture-input {
-  flex: 1;
-  min-height: 15rem; /* ~10 visible rows */
-  resize: none; /* height is flex-driven now */
+  flex: 1 1 6rem;
+  min-height: 6rem;
+  resize: none;
 }
 
 .scratch-recent {
-  flex: 1 1 30%;
-  min-height: 5rem;
+  flex: calc((1 - var(--editor-ratio)) * 1000) 1 0;
+  min-height: 4rem;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
@@ -1001,16 +1002,59 @@ h1, h2, h3 {
   flex-shrink: 0;
 }
 
+/* Resize handle between editor and recent sections: a full-height hit target with
+   visual feedback (slanting bars = resize icon, similar to column resize handles). */
+.scratch-resize-handle {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  cursor: row-resize;
+  touch-action: none;
+  user-select: none;
+  flex-shrink: 0;
+  height: 8px;
+  margin: 2px 0;
+}
+
+.scratch-resize-bar {
+  width: 40px;
+  height: 3px;
+  border-radius: 2px;
+  background: repeating-linear-gradient(
+    45deg,
+    var(--border),
+    var(--border) 2px,
+    transparent 2px,
+    transparent 4px
+  );
+  transition: background 0.12s ease;
+}
+
+.scratch-resize-handle:hover .scratch-resize-bar,
+.scratch-resize-handle:active .scratch-resize-bar {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--done),
+    var(--done) 2px,
+    transparent 2px,
+    transparent 4px
+  );
+}
+
 /* The dimmed routed/resolved confirmation tail in RECENT. */
 .scratch-entry--dim {
   opacity: 0.55;
 }
 
-/* Deferred-capture undo toast — bottom-LEFT so it never overlaps the task write
-   toasts (bottom-right). Reuses the neutral action-toast styling. */
+/* Deferred-capture undo toast — top-right for ergonomic visibility. Portaled to
+   <body> so it is always viewport-fixed and on top regardless of the panel's nesting.
+   Reuses the neutral action-toast styling. */
 .toast--capture {
-  right: auto;
-  left: 20px;
+  top: 20px;
+  bottom: auto;
+  right: 20px;
+  left: auto;
+  z-index: 1200;
 }
 
 /* Date-urgency cues (goal 7a): a faint header tint + a 3px colored left edge on
@@ -1052,8 +1096,33 @@ h1, h2, h3 {
   background: rgba(180, 131, 9, 0.12);
 }
 
-/* Demote group boxes to a hairline so the date cue dominates: drop the filled
-   background, keep only the thin light-gray border. */
+/* Fewer lines = calmer list. Tasks (standalone and inside groups) and group
+   wrappers drop the per-row bottom divider entirely — the whitespace + urgency
+   cues carry the structure now. (`.panel li` still borders scratchpad/review
+   rows; these two rules out-specify it for the task columns only.) */
+.panel li.task-item,
+.panel li.group-item-wrapper {
+  border-bottom: none;
+}
+
+/* Groups lose their box (border + radius + filled background) in favour of the
+   same left-edge language as the date-urgency cues — a soft blue rail marks the
+   grouped run without a heavy container. The header divider goes too. */
 .group-container {
+  border: none;
+  border-left: 2px solid rgba(37, 99, 235, 0.4);
+  border-radius: 0;
   background: none;
+  overflow: visible;
+  padding-left: 8px;
+  margin: 6px 0;
+}
+
+.group-header {
+  border-bottom: none;
+  padding: 3px 0;
+}
+
+.group-tasks {
+  padding-left: 0;
 }
