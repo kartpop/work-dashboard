@@ -96,6 +96,18 @@ function bucketHeading(bucket: Bucket): string {
   return `${prefix} — ${weekday}, ${dmy}`;
 }
 
+/**
+ * Date-urgency cue class for a bucket (goal 7a): Overdue / Today / Tomorrow get a
+ * faint header tint + a 3px colored left edge; every later bucket and NO_DATE stay
+ * plain so the near-term dates read at a glance. Colors live in CSS.
+ */
+function bucketUrgencyClass(bucket: Bucket): string {
+  if (bucket.key === "OVERDUE") return "bucket--overdue";
+  if (bucket.key === istDayKey(0)) return "bucket--today";
+  if (bucket.key === istDayKey(1)) return "bucket--tomorrow";
+  return "";
+}
+
 // ── Rank helpers ──────────────────────────────────────────────────────────────
 
 function effectiveRank(item: BucketItem, index: number): number {
@@ -571,8 +583,10 @@ function BucketSection({
     setAddingGroup(false);
   }
 
+  const urgency = bucketUrgencyClass(bucket);
+
   return (
-    <div className="date-group">
+    <div className={`date-group${urgency ? ` ${urgency}` : ""}`}>
       <span className="date-group-label">{bucketHeading(bucket)}</span>
       <SortableContext items={ids} strategy={verticalListSortingStrategy}>
         <ul ref={setDroppableRef} className="bucket-droppable">
@@ -732,53 +746,57 @@ function TaskListColumn({
           ⟳
         </button>
       </div>
-      {adding ? (
-        <div className="add-task-form">
-          <input
-            className="add-task-input"
-            placeholder="New task"
-            value={newTitle}
-            autoFocus
-            onChange={(e) => setNewTitle(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submitNewTask();
-              if (e.key === "Escape") {
+      {/* Everything below the header scrolls internally (goal 7a height cap); the
+          header (title + refresh) stays pinned while the list scrolls. */}
+      <div className="task-column-body">
+        {adding ? (
+          <div className="add-task-form">
+            <input
+              className="add-task-input"
+              placeholder="New task"
+              value={newTitle}
+              autoFocus
+              onChange={(e) => setNewTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitNewTask();
+                if (e.key === "Escape") {
+                  setAdding(false);
+                  setNewTitle("");
+                }
+              }}
+            />
+            <button className="add-task-confirm" onClick={submitNewTask}>
+              Add
+            </button>
+            <button
+              className="add-task-cancel"
+              onClick={() => {
                 setAdding(false);
                 setNewTitle("");
-              }
-            }}
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button className="add-task-btn" onClick={() => setAdding(true)}>
+            + add task
+          </button>
+        )}
+        {list.buckets.map((bucket) => (
+          <BucketSection
+            key={bucket.key}
+            bucket={bucket}
+            list={list}
+            actions={actions}
+            onRenameGroup={tasks.renameGroup}
+            onDeleteGroup={tasks.deleteGroup}
+            onCreateGroup={(listId, bucketKey, name) =>
+              void tasks.createGroup(listId, bucketKey, name)
+            }
           />
-          <button className="add-task-confirm" onClick={submitNewTask}>
-            Add
-          </button>
-          <button
-            className="add-task-cancel"
-            onClick={() => {
-              setAdding(false);
-              setNewTitle("");
-            }}
-          >
-            Cancel
-          </button>
-        </div>
-      ) : (
-        <button className="add-task-btn" onClick={() => setAdding(true)}>
-          + add task
-        </button>
-      )}
-      {list.buckets.map((bucket) => (
-        <BucketSection
-          key={bucket.key}
-          bucket={bucket}
-          list={list}
-          actions={actions}
-          onRenameGroup={tasks.renameGroup}
-          onDeleteGroup={tasks.deleteGroup}
-          onCreateGroup={(listId, bucketKey, name) =>
-            void tasks.createGroup(listId, bucketKey, name)
-          }
-        />
-      ))}
+        ))}
+      </div>
     </section>
   );
 }

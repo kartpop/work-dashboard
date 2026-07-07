@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-A personal work dashboard that surfaces Google Tasks, Calendar, and Drive alongside a small
+A personal dashboard that surfaces Google Tasks, Calendar, and Drive alongside a small
 task-metadata overlay.
 
 ## Stack

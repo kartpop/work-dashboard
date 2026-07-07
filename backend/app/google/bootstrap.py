@@ -34,7 +34,7 @@ async def _bootstrap() -> int:
         )
         return 1
 
-    doc_id = await docs_client.create_doc_in_folder("Work Dashboard — Notes", folder_id)
+    doc_id = await docs_client.create_doc_in_folder("Dashboard — Notes", folder_id)
     print("Created notes Doc inside the folder.")
     print(f"\n  NOTES_DOC_ID={doc_id}\n")
     print("Paste that line into backend/.env, then restart the backend.")

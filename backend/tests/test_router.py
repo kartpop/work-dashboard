@@ -561,11 +561,17 @@ def test_insert_note_puts_h3_timestamp_at_top(monkeypatch):
     assert captured["documentId"] == "DOC"
     assert reqs[0]["insertText"]["location"]["index"] == 1
     assert reqs[0]["insertText"]["text"].startswith("6-July-2026, 8:41 PM IST\n")
-    assert reqs[0]["insertText"]["text"].endswith("- a\n- b\n")  # verbatim body
+    # verbatim body, then a trailing empty paragraph (the delimiter, goal 7a)
+    assert reqs[0]["insertText"]["text"].endswith("- a\n- b\n\n")
     assert reqs[1]["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"] == (
         "HEADING_3"
     )
     assert reqs[1]["updateParagraphStyle"]["range"]["startIndex"] == 1
+    # The last request styles the empty delimiter paragraph with a light-gray
+    # borderBottom + spacing — insert-only, no HR request exists.
+    delim = reqs[-1]["updateParagraphStyle"]
+    assert "borderBottom" in delim["paragraphStyle"]
+    assert "borderBottom" in delim["fields"]
 
 
 def test_confirm_as_note_review_writes_to_doc(

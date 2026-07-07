@@ -952,3 +952,108 @@ h1, h2, h3 {
 .review-dismiss {
   color: var(--done);
 }
+
+/* ── Goal 7a: daily-driver polish ─────────────────────────────────────────── */
+
+/* Top-row columns (My Tasks | Follow-ups | Scratchpad) are viewport-height-capped
+   flex columns: the header stays pinned while the body scrolls internally. */
+.top-row-resizable > .panel {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 120px);
+  min-height: 360px;
+}
+
+.top-row-resizable > .panel > .panel-head {
+  flex-shrink: 0;
+}
+
+/* Task columns: everything below the header scrolls; the header (title+refresh)
+   stays visible (goal 7a height cap). */
+.task-column-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Scratchpad: the editor takes ~60% of the column by default (min ~10 rows) and
+   RECENT scrolls in the remainder with its own scrollbar. */
+.capture-panel .capture-form {
+  flex: 1 1 60%;
+  min-height: 0;
+}
+
+.capture-panel .capture-input {
+  flex: 1;
+  min-height: 15rem; /* ~10 visible rows */
+  resize: none; /* height is flex-driven now */
+}
+
+.scratch-recent {
+  flex: 1 1 30%;
+  min-height: 5rem;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.scratch-recent > h3 {
+  flex-shrink: 0;
+}
+
+/* The dimmed routed/resolved confirmation tail in RECENT. */
+.scratch-entry--dim {
+  opacity: 0.55;
+}
+
+/* Deferred-capture undo toast — bottom-LEFT so it never overlaps the task write
+   toasts (bottom-right). Reuses the neutral action-toast styling. */
+.toast--capture {
+  right: auto;
+  left: 20px;
+}
+
+/* Date-urgency cues (goal 7a): a faint header tint + a 3px colored left edge on
+   Overdue / Today / Tomorrow buckets. Very low saturation — a cue, not decoration.
+   Later buckets + NO_DATE stay plain. */
+.date-group.bucket--overdue,
+.date-group.bucket--today,
+.date-group.bucket--tomorrow {
+  border-left: 3px solid transparent;
+  padding-left: 7px;
+  margin-left: -1px;
+}
+
+.date-group.bucket--overdue {
+  border-left-color: rgba(192, 57, 43, 0.55);
+}
+.date-group.bucket--today {
+  border-left-color: rgba(4, 120, 87, 0.6);
+}
+.date-group.bucket--tomorrow {
+  border-left-color: rgba(180, 131, 9, 0.6);
+}
+
+.date-group.bucket--overdue .date-group-label,
+.date-group.bucket--today .date-group-label,
+.date-group.bucket--tomorrow .date-group-label {
+  padding: 2px 6px;
+  margin-left: -6px;
+  border-radius: 3px;
+}
+
+.date-group.bucket--overdue .date-group-label {
+  background: rgba(192, 57, 43, 0.1);
+}
+.date-group.bucket--today .date-group-label {
+  background: rgba(4, 120, 87, 0.1);
+}
+.date-group.bucket--tomorrow .date-group-label {
+  background: rgba(180, 131, 9, 0.12);
+}
+
+/* Demote group boxes to a hairline so the date cue dominates: drop the filled
+   background, keep only the thin light-gray border. */
+.group-container {
+  background: none;
+}

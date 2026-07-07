@@ -1,4 +1,4 @@
-# Work Dashboard
+# Dashboard
 
 A personal dashboard that surfaces Google Tasks (and, later, Calendar and Drive) alongside a
 small local task-metadata overlay — custom sort, grouping, and a capture-box that auto-files

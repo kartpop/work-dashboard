@@ -3,7 +3,7 @@ name: verifier-web
 description: Launch recipe and observation protocol for verifying changes to this dashboard (FastAPI backend on :8010, React/Vite frontend on :5173). Use whenever the verify skill requires a handle on this app's surfaces.
 ---
 
-# Web verifier — work-dashboard
+# Web verifier — dashboard
 
 Covers the two runtime surfaces: the FastAPI backend (`:8010`) and the React frontend (`:5173`).
 Both must be running before you drive either surface.

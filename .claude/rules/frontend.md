@@ -38,3 +38,14 @@ paths: ["frontend/**"]
   reload (`load()`) after a drag op. A single drag always produces exactly one PATCH
   (rank ± group_id). For the DnD implementation details, known rough edges, and bug history
   see `.claude/rules/tasks-panel.md` (auto-loads when editing `frontend/src/panels/tasks/**`).
+- **Deferred-write undo toasts (g4a delete, g7a capture) — a shared shape, not an abstraction.**
+  Two surfaces now hold a write behind a ~5s "Undo" toast, and they share the same skeleton (kept
+  local to each, deliberately — no forced helper): the optimistic UI change applies immediately; the
+  held payload + timer live in **refs** (survive re-renders, so the deferred write isn't lost); a
+  `commitPending()` fires the held write when the window lapses **and** is called first when a new
+  action supersedes the pending one (one toast at a time); an unmount effect flushes any still-held
+  write. The two differ only in what Undo does: **delete** (in `useTasksPanel`) restores a snapshot
+  and never sends the `DELETE` (zero Google writes); **capture** (in `CapturePanel`) restores the
+  text into the editor — prepending above anything typed during the window — and never sends the
+  `POST /scratch` (zero backend writes; the append-only store has no delete endpoint by design). If a
+  third deferred toast appears, *then* consider extracting; two is not enough to abstract.

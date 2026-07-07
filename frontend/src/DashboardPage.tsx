@@ -15,7 +15,7 @@ export function DashboardPage() {
 
   return (
     <main className="dashboard">
-      <h1>Work Dashboard</h1>
+      <h1>Dashboard</h1>
       {/* Full-width, resizable top row: My Tasks | Follow-ups | Scratchpad (goal
           6). The pinned pair shares one DndContext (cross-list drag); the
           scratchpad is passed in as the third column so no panel imports another. */}

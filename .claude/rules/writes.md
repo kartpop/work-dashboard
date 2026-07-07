@@ -19,10 +19,12 @@ DB — treat them with more care than overlay writes. Read this before editing t
   (g4); `create_task`, `update_content`, `delete`, `rename_list` (g4a); `append_note` (g7).
   Routers stay thin and call the writes service.
 - `app/google/docs.py` (g7) is the **thin Docs/Drive client** — one Google call each:
-  `insert_note` (Docs `documents.batchUpdate`, insert-only), `get_parents` (Drive `files.get`, the
-  ancestry gate's read), and `create_doc_in_folder` (Drive `files.create`, the **only** sanctioned
-  file-create, used by the `app.google.bootstrap` command). It **never** calls `files.delete` or a
-  content-overwriting `files.update` — the AST test pins that surface.
+  `insert_note` (Docs `documents.batchUpdate`, insert-only — H3 heading + verbatim body + a trailing
+  empty paragraph styled as a light-gray `borderBottom` delimiter (g7a); still ONE `batchUpdate`, no
+  new method surface, so the AST insert-only test is unchanged), `get_parents` (Drive `files.get`,
+  the ancestry gate's read), and `create_doc_in_folder` (Drive `files.create`, the **only**
+  sanctioned file-create, used by the `app.google.bootstrap` command). It **never** calls
+  `files.delete` or a content-overwriting `files.update` — the AST test pins that surface.
 
 ## The Google fields that may be written (goal 4a)
 

@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: Verifies changes to the work-dashboard app by running curl checks and Playwright screenshots. Returns a PASS/FAIL report. Use for Goal 3+ verification.
+description: Verifies changes to the dashboard app by running curl checks and Playwright screenshots. Returns a PASS/FAIL report. Use for Goal 3+ verification.
 tools: Bash, Read
 model: haiku
 skills:

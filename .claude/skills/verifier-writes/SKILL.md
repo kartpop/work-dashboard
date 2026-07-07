@@ -3,7 +3,7 @@ name: verifier-writes
 description: Safe verification recipe for Google write paths (reschedule, move). Exercises writes ONLY against dedicated zz-verifier-test lists, then cleans up. Preload alongside verifier-web whenever a goal writes to Google (goal 4+).
 ---
 
-# Write-path verifier — work-dashboard
+# Write-path verifier — dashboard
 
 Goal 4 introduced the first Google writes (reschedule = due-date change; move = insert+delete across
 lists). These touch the user's real Google Tasks. **Never exercise a write against a real list.** All

@@ -43,9 +43,18 @@ indent (Enter on an empty bullet exits the list), Tab / Shift+Tab indent/outdent
 (or Cmd/Ctrl+Enter) captures the whole editor as one entry** and clears it. It's a plain `<textarea>`
 — the value is captured verbatim (bullets as literal text).
 
+**Deferred capture (goal 7a):** Shift+Enter clears the editor immediately but **holds the
+`POST /scratch` for ~5s** behind a "Captured — Undo" toast. **Undo restores the text with zero
+backend writes** (undo-by-never-sending — the append-only store is untouched, no delete endpoint
+exists); letting the window lapse fires exactly one POST. This is entirely client-side — the
+endpoint below is unchanged. (Known: **Route now** clicked inside the window won't include the
+still-held capture.)
+
 - `POST /scratch` `{text}` — append a capture (append-only; never edits/deletes prior entries).
 - `GET /scratch` — recent entries with their routing state (`unrouted` / `routed_task` /
-  `kept_note` / `in_review` / `resolved`).
+  `kept_note` / `in_review` / `resolved`). The scratchpad's **RECENT** list (goal 7a) filters this
+  client-side: unresolved entries (`unrouted` + `in_review`) first, then only the ~5 most-recent
+  routed/resolved as a dimmed tail.
 - `POST /scratch/route-now` — route every unrouted entry now (same code path as the scheduled job;
   idempotent — route-once).
 - `GET /review` — pending review items (low-confidence / `event` / `unknown` — calendar is
@@ -56,7 +65,9 @@ indent (Enter on an empty bullet exits the list), Tab / Shift+Tab indent/outdent
 
 **Notes → Google Doc (goal 7).** A high-confidence `note` is appended **verbatim** to the top of one
 configured Doc (`NOTES_DOC_ID`) under a Heading-3 timestamp (`6-July-2026, 8:41 PM IST`), newest
-first — insert-only. Unset `NOTES_DOC_ID` → the note stays kept-local with a logged warning. Drive
+first — insert-only. Each note ends with a **light-gray `borderBottom` delimiter paragraph** with
+spacing above/below (goal 7a — the Docs API has no horizontal-rule request), so consecutive notes
+read as separated entries. Unset `NOTES_DOC_ID` → the note stays kept-local with a logged warning. Drive
 access is **`drive.file`-scoped** with a folder-ancestry gate + startup scope assertion (ADR
 `docs/goals/architecture/drive-access-scoping.md`); doc/folder IDs are config-only. Setup:
 [goals/goal-7-owner-steps.md](goals/goal-7-owner-steps.md). Bootstrap the Doc with

@@ -31,7 +31,7 @@ async def lifespan(_app: FastAPI):
         await router_scheduler.stop()
 
 
-app = FastAPI(title="Work Dashboard API", lifespan=lifespan)
+app = FastAPI(title="Dashboard API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

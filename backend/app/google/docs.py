@@ -55,13 +55,21 @@ def _insert_note(doc_id: str, heading_text: str, body_text: str) -> None:
     Newest note always lands first. Index 1 is the start of the body; a single
     batchUpdate applies its requests sequentially, so the style ranges see the
     just-inserted text. Insert-only — nothing existing is deleted or overwritten.
+
+    A trailing empty paragraph is styled as a light-gray delimiter with spacing
+    above/below (goal 7a) — the Docs API has no horizontal-rule request, so a
+    `borderBottom` on an empty paragraph is the closest insert-only equivalent —
+    so consecutive notes read as separated entries, not a run-on wall. The
+    delimiter also keeps the previously top-most content in its own paragraph.
     """
     service = _docs_service()
 
-    # Our block: "<heading>\n<body>\n". The trailing newline keeps the previously
-    # top-most content in its own paragraph (its style is untouched).
-    block = f"{heading_text}\n{body_text}\n"
+    # Block: "<heading>\n<body>\n\n" — heading paragraph, body paragraph, and a
+    # trailing EMPTY paragraph that carries the delimiter styling below.
+    block = f"{heading_text}\n{body_text}\n\n"
     heading_end = 1 + len(heading_text) + 1  # end index of the heading paragraph
+    body_end = heading_end + len(body_text) + 1  # end index of the body paragraph
+    delim_end = body_end + 1  # end index of the empty delimiter paragraph
 
     requests: list[dict] = [
         {"insertText": {"location": {"index": 1}, "text": block}},
@@ -77,12 +85,38 @@ def _insert_note(doc_id: str, heading_text: str, body_text: str) -> None:
         requests.append(
             {
                 "updateParagraphStyle": {
-                    "range": {"startIndex": heading_end, "endIndex": 1 + len(block)},
+                    "range": {"startIndex": heading_end, "endIndex": body_end},
                     "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
                     "fields": "namedStyleType",
                 }
             }
         )
+    # The trailing empty paragraph → a light-gray horizontal delimiter with
+    # breathing room, separating this note from the one below. Insert-only: this
+    # styles the just-inserted empty paragraph, never any pre-existing content.
+    requests.append(
+        {
+            "updateParagraphStyle": {
+                "range": {"startIndex": body_end, "endIndex": delim_end},
+                "paragraphStyle": {
+                    "namedStyleType": "NORMAL_TEXT",
+                    "spaceAbove": {"magnitude": 8, "unit": "PT"},
+                    "spaceBelow": {"magnitude": 8, "unit": "PT"},
+                    "borderBottom": {
+                        "color": {
+                            "color": {
+                                "rgbColor": {"red": 0.8, "green": 0.8, "blue": 0.8}
+                            }
+                        },
+                        "width": {"magnitude": 1, "unit": "PT"},
+                        "padding": {"magnitude": 0, "unit": "PT"},
+                        "dashStyle": "SOLID",
+                    },
+                },
+                "fields": "namedStyleType,spaceAbove,spaceBelow,borderBottom",
+            }
+        }
+    )
 
     service.documents().batchUpdate(
         documentId=doc_id, body={"requests": requests}
