@@ -21,7 +21,7 @@ CLAUDE.md
 ├── rules/            # path-scoped conventions (backend.md, frontend.md)
 └── skills/           # empty for now
 .mcp.json             # Google Workspace MCP registration
-docs/goals/           # goal specs, one per milestone
+docs/goals/           # goal specs, one per milestone (+ architecture/ decision records)
 backend/              # FastAPI app
 frontend/             # React app
 ```
@@ -42,3 +42,4 @@ acceptance criteria for the active milestone — do not work outside that scope.
 
 - Never commit OAuth tokens, `CLAUDE.local.md`, or `.claude/settings.local.json`.
 - Dashboard read paths call the Google API client directly. Do not use MCP or an LLM to read tasks, calendar, or drive.
+- Google Drive/Docs OAuth scope is `drive.file` only — never `documents` or `drive`. Doc/folder IDs come from config, never from LLM output. (ADR: `docs/goals/architecture/drive-access-scoping.md`.)
