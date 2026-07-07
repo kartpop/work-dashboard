@@ -257,7 +257,7 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
           ref={taRef}
           className="capture-input"
           value={text}
-          placeholder="Dump a thought — `- ` starts a bullet, Shift+Enter files it…"
+          placeholder="Dump a thought: `- ` starts a bullet, Shift+Enter files it…"
           rows={12}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
