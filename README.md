@@ -18,6 +18,9 @@ see [docs/api-reference.md](docs/api-reference.md); for the milestone history, s
 - An `ANTHROPIC_API_KEY` in the backend environment if you want the scratchpad auto-router to
   classify captures. Without it, captures fall through to the manual review queue (no Google
   writes) — everything else works fine.
+- **(Notes → Doc, goal 7, optional)** `NOTES_FOLDER_ID` and `NOTES_DOC_ID` in `backend/.env` to
+  let high-confidence notes write to a Google Doc. Unset → notes stay kept-local (no crash). See
+  the ordered setup in [docs/goals/goal-7-owner-steps.md](docs/goals/goal-7-owner-steps.md).
 
 ## Running it
 
@@ -37,6 +40,15 @@ The OAuth token is persisted to the gitignored `backend/.google-tokens/token.jso
 > **Re-authorize for write access:** the app needs read/write Google Tasks scope to create,
 > reschedule, edit, and complete tasks. A token can't widen its own scope — if write calls return
 > 403, **delete `backend/.google-tokens/token.json` and re-run `uv run python -m app.google.auth`**.
+
+> **Notes → Google Doc (goal 7):** the notes writer adds the **`drive.file`** scope (files the app
+> creates only — never full Drive/Docs; ADR `docs/goals/architecture/drive-access-scoping.md`).
+> Enabling it is a one-time flow: set `NOTES_FOLDER_ID`, delete the token + re-auth (verify the
+> consent screen shows *file-scoped* Drive wording), run `uv run python -m app.google.bootstrap` to
+> create the notes Doc inside that folder, paste the printed `NOTES_DOC_ID` into `backend/.env`,
+> then revoke the old broad grant at <https://myaccount.google.com/permissions>. Full steps:
+> [docs/goals/goal-7-owner-steps.md](docs/goals/goal-7-owner-steps.md). The backend refuses to boot
+> if the token carries a scope broader than `{tasks, calendar.readonly, drive.file}`.
 
 ### Frontend
 

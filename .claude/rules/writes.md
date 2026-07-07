@@ -1,5 +1,5 @@
 ---
-paths: ["backend/app/writes/**", "backend/app/google/tasks.py"]
+paths: ["backend/app/writes/**", "backend/app/google/tasks.py", "backend/app/google/docs.py", "backend/app/google/bootstrap.py"]
 ---
 
 # Google write safety (goal 4+)
@@ -16,8 +16,13 @@ DB — treat them with more care than overlay writes. Read this before editing t
   `asyncio.to_thread(...)` split as the read functions.
 - `app/writes/service.py` owns **orchestration**: it sequences Google calls and overlay-row
   updates, validates inputs, and decides what (if anything) to write: `reschedule`, `move`
-  (g4); `create_task`, `update_content`, `delete`, `rename_list` (g4a). Routers stay thin and
-  call the writes service.
+  (g4); `create_task`, `update_content`, `delete`, `rename_list` (g4a); `append_note` (g7).
+  Routers stay thin and call the writes service.
+- `app/google/docs.py` (g7) is the **thin Docs/Drive client** — one Google call each:
+  `insert_note` (Docs `documents.batchUpdate`, insert-only), `get_parents` (Drive `files.get`, the
+  ancestry gate's read), and `create_doc_in_folder` (Drive `files.create`, the **only** sanctioned
+  file-create, used by the `app.google.bootstrap` command). It **never** calls `files.delete` or a
+  content-overwriting `files.update` — the AST test pins that surface.
 
 ## The Google fields that may be written (goal 4a)
 
@@ -64,7 +69,20 @@ patch body.
   g4a date path, to set the new task's due date) — both create/metadata, nothing destructive. Routing
   may **never** call `delete_task`, the complete/uncomplete `status` write, or `update_content`. This
   create-only contract lives in `.claude/rules/router.md` and is asserted by a router write-path test
-  (the router's write dependency set is exactly `{create_task, reschedule}`).
+  (the router's write dependency set is exactly `{create_task, reschedule, append_note}` from g7).
+- **`append_note` is a router-only caller (goal 7).** `writes.service.append_note(doc_id, folder_id,
+  body_text)` is the notes writer: it appends a captured note **verbatim, insert-only** to the top of
+  the configured Doc under an H3 timestamp (`format_note_heading`). Its **only** caller is
+  `app.router.service` (the high-confidence `note` path + confirm-as-note in review). It is
+  **insert-only forever** — never a Docs delete, never a content overwrite, never a status/content
+  task write. The `delete_task` two-caller rule and the `create_task` two-caller rule both stand
+  unchanged; `append_note` adds a *new* surface, it doesn't widen the task-write callers.
+- **Folder-ancestry gate + fail-closed (goal 7).** Before any `batchUpdate`, `append_note` verifies
+  the target doc's `parents` chain reaches `NOTES_FOLDER_ID` (`_assert_in_notes_folder`, cached per
+  doc id). **Fail-closed:** a missing folder id, an unreachable doc, or any error verifying ancestry
+  → raise `ApiError`, do **not** write (the router leaves the entry re-routable; route-once marks it
+  routed only after a successful append). Doc/folder IDs are **config-only** (`NOTES_DOC_ID` /
+  `NOTES_FOLDER_ID` env), never from LLM output or request payloads.
 - **Completion writes immediately; delete defers (g4a).** Completion (`status` patch) is
   non-destructive — Google retains completed tasks and uncomplete is cheap — so the write fires
   now; the undo-toast is mis-click recovery. **Delete is the only genuinely irreversible op**, so
@@ -86,6 +104,13 @@ patch body.
 ## Scope / auth
 
 Writes need the read/write `https://www.googleapis.com/auth/tasks` scope (not `tasks.readonly`).
-It lives in `app.google.auth.SCOPES`; changing scopes requires re-running
-`uv run python -m app.google.auth` to re-mint a token. Never run the consent flow from
-request-handling code.
+Notes writing (g7) needs **`drive.file` — and only `drive.file`**, never `documents`/`drive` (ADR:
+`docs/goals/architecture/drive-access-scoping.md`). Scopes live in `app.google.auth.SCOPES`;
+changing them requires re-running `uv run python -m app.google.auth` to re-mint a token. Never run
+the consent flow from request-handling code.
+
+A **startup scope assertion** (`assert_scopes_within_allowlist`, called in `main.lifespan`) refuses
+to boot if the token carries any scope outside `ALLOWED_SCOPES` — a token *missing* `drive.file` is
+fine (notes degrade to kept-local), a token *broader* than the allowlist is not. `load_credentials`
+reads scopes from the token file itself (not forced to `SCOPES`) so an old narrow token still
+refreshes cleanly after `SCOPES` grows.

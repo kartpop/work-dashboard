@@ -811,7 +811,11 @@ h1, h2, h3 {
 .capture-input {
   width: 100%;
   resize: vertical;
-  font: inherit;
+  /* Monospace so two-space bullet indentation lines up visually. */
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  tab-size: 2;
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -901,6 +905,13 @@ h1, h2, h3 {
   margin: 2px 0 6px;
   font-size: 13px;
   color: var(--done);
+}
+
+.review-note-hint {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--muted, #6b7280);
+  font-style: italic;
 }
 
 .review-fields {

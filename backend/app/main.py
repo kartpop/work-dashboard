@@ -13,12 +13,16 @@ from fastapi.responses import JSONResponse  # noqa: E402
 from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
 
 from app.db import create_tables  # noqa: E402
+from app.google.auth import assert_scopes_within_allowlist  # noqa: E402
 from app.router import scheduler as router_scheduler  # noqa: E402
 from app.routers import calendar, scratch, tasks  # noqa: E402
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Fail-closed on a token that carries scopes beyond the allowlist (e.g. a broad
+    # Drive/Docs grant left over from debugging) — see drive-access-scoping ADR.
+    assert_scopes_within_allowlist()
     create_tables()
     router_scheduler.start()
     try:

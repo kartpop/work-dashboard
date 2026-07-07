@@ -30,3 +30,9 @@
 {"text": "entropy", "destination": "unknown", "ambiguous": true}
 {"text": "finish the slides for monday's review and send to the team", "destination": "task", "expects_due": true, "title_contains": "slides"}
 {"text": "coffee with Priya wednesday 4pm at Third Wave", "destination": "event"}
+{"text": "- thesis: our churn is an activation problem not an acquisition one\n- most drop-off happens before the first aha moment\n- idea: gate the product tour on one real action", "destination": "note", "title_contains": "activation"}
+{"text": "brainstorm for the offsite theme:\n- build less ship more\n- a whole week on customer obsession\n- invite a founder to talk", "destination": "note"}
+{"text": "- book rec from Ravi: Thinking in Systems\n- and the Deming one about quality being built in", "destination": "note"}
+{"text": "reflection: the borrow checker is basically library-book loans for memory, worth writing up", "destination": "note"}
+{"text": "the palette thing", "destination": "note", "ambiguous": true}
+{"text": "designer follow-up, maybe", "destination": "task", "ambiguous": true}

@@ -44,3 +44,20 @@ convention. Pick a `code` that names the failing service, e.g. `google_tasks_una
 Don't forward raw Google API payloads. Map to a small, stable dict (id/title/status/etc.) in the
 `_fetch_*` function — this keeps the frontend decoupled from upstream field churn and keeps
 endpoints "dumb" (fetch + reshape, no ranking or merging).
+
+## Docs / Drive writes (goal 7 — `app/google/docs.py`)
+
+The notes writer added a Docs/Drive client. Conventions specific to it:
+
+- **Scope is `drive.file` only** — never `documents`/`drive` (ADR
+  `docs/goals/architecture/drive-access-scoping.md`). Google enforces the token can touch only files
+  the app *created*, so there is exactly one create path (`create_doc_in_folder`, hard-coding
+  `parents=[folder_id]`), used only by the `app.google.bootstrap` command.
+- **Docs edits go through `documents.batchUpdate`** with a list of request dicts applied in order
+  (later requests see earlier edits' index shifts). Inserting at the **top of the body** = index `1`;
+  build the block as one `insertText`, then `updateParagraphStyle` ranges over it (heading vs body).
+  Indices are UTF-16 offsets — plain ASCII/newlines count as 1.
+- **Insert-only.** This client never calls `files.delete` or a content-overwriting `files.update`;
+  the AST guardrail test (`test_docs_module_write_surface_is_insert_only`) pins that surface. Read a
+  file's parents for the folder-ancestry gate via `files.get(fields="parents")`.
+- Same sync `_fn` / `async def` + `asyncio.to_thread` split as the other client modules.

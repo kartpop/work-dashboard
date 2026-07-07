@@ -1,7 +1,13 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { ReviewFields } from "./useScratchPanel";
 import { useScratchPanel } from "./useScratchPanel";
 import { ReviewQueue } from "./ReviewPanel";
+import {
+  handleEnter,
+  indentLine,
+  outdentLine,
+  type EditorState,
+} from "./bulletEditor";
 
 const STATE_LABEL: Record<string, string> = {
   unrouted: "Unrouted",
@@ -16,13 +22,68 @@ const STATE_LABEL: Record<string, string> = {
 export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
   const scratch = useScratchPanel();
   const [text, setText] = useState("");
+  const [captureError, setCaptureError] = useState<string | null>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  // A bullet keystroke sets both value and caret; the textarea is controlled, so
+  // stash the desired selection and re-apply it once React has flushed the value.
+  const pendingSel = useRef<{ start: number; end: number } | null>(null);
 
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const t = text.trim();
-    if (!t) return;
-    scratch.capture(t).catch(() => {});
-    setText("");
+  useLayoutEffect(() => {
+    if (pendingSel.current && taRef.current) {
+      taRef.current.selectionStart = pendingSel.current.start;
+      taRef.current.selectionEnd = pendingSel.current.end;
+      pendingSel.current = null;
+    }
+  }, [text]);
+
+  const apply = (next: EditorState) => {
+    pendingSel.current = { start: next.selectionStart, end: next.selectionEnd };
+    setText(next.value);
+  };
+
+  // Capture the WHOLE editor as one entry, verbatim. Clear only on success; on
+  // failure leave the text in place with the error shown.
+  const submit = async () => {
+    if (!text.trim()) return;
+    try {
+      await scratch.capture(text);
+      setText("");
+      setCaptureError(null);
+    } catch (err) {
+      setCaptureError((err as Error).message);
+    }
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const ta = e.currentTarget;
+    const snap: EditorState = {
+      value: text,
+      selectionStart: ta.selectionStart,
+      selectionEnd: ta.selectionEnd,
+    };
+    // Shift+Enter (primary) / Cmd|Ctrl+Enter (secondary) = capture. Plain Enter never submits.
+    if (e.key === "Enter" && (e.shiftKey || e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      void submit();
+      return;
+    }
+    if (e.key === "Enter") {
+      const next = handleEnter(snap);
+      if (next) {
+        e.preventDefault(); // bullet continue/exit; else fall through to a plain newline
+        apply(next);
+      }
+      return;
+    }
+    if (e.key === "Tab") {
+      e.preventDefault(); // Tab is captive inside the editor
+      apply(e.shiftKey ? outdentLine(snap) : indentLine(snap));
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault(); // blur so keyboard users can tab away past the captive editor
+      ta.blur();
+    }
   };
 
   const routeNow = () => {
@@ -54,16 +115,21 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
         </button>
       </div>
 
-      <form className="capture-form" onSubmit={submit}>
+      <form
+        className="capture-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
         <textarea
+          ref={taRef}
           className="capture-input"
           value={text}
-          placeholder="Dump a thought — it files itself…"
-          rows={2}
+          placeholder="Dump a thought — `- ` starts a bullet, Shift+Enter files it…"
+          rows={4}
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(e);
-          }}
+          onKeyDown={onKeyDown}
         />
         <button
           type="submit"
@@ -74,6 +140,9 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
         </button>
       </form>
 
+      {captureError && (
+        <p className="panel-error">Capture failed: {captureError}</p>
+      )}
       {scratch.error && <p className="panel-error">{scratch.error}</p>}
 
       <ReviewQueue

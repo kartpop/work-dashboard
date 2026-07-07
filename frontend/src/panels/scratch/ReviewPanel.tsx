@@ -70,6 +70,11 @@ function ReviewRow({
         </span>
       </div>
       {item.reason && <p className="review-reason">{item.reason}</p>}
+      {destination === "note" && (
+        <p className="review-note-hint">
+          Confirming as a note appends it to your notes Doc.
+        </p>
+      )}
       <div className="review-fields">
         <label>
           Type

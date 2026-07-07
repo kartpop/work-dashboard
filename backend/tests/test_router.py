@@ -145,6 +145,28 @@ def fake_classify(monkeypatch):
     return holder
 
 
+@pytest.fixture
+def notes(monkeypatch):
+    """Mock the goal-7 Docs/Drive surface: record note inserts, script folder
+    ancestry, and start from an unconfigured (kept-local) env with a clean cache."""
+    from app.writes import service as writes_svc
+
+    writes_svc._ancestry_ok.clear()
+    rec = {"insert": [], "parents": {}}
+
+    async def _get_parents(file_id):
+        return rec["parents"].get(file_id, [])
+
+    async def _insert_note(doc_id, heading, body):
+        rec["insert"].append((doc_id, heading, body))
+
+    monkeypatch.setattr("app.google.docs.get_parents", _get_parents)
+    monkeypatch.setattr("app.google.docs.insert_note", _insert_note)
+    monkeypatch.delenv("NOTES_DOC_ID", raising=False)
+    monkeypatch.delenv("NOTES_FOLDER_ID", raising=False)
+    return rec
+
+
 def _set(holder, destination, confidence, **fields):
     holder["result"] = RouterClassification(
         destination=destination, confidence=confidence, fields=RouterFields(**fields)
@@ -172,11 +194,73 @@ def test_high_conf_task_creates_one_task(session, google, fake_classify):
     assert "update_task_content" not in google.names()
 
 
-def test_high_conf_note_kept_local_no_writes(session, google, fake_classify):
+def test_high_conf_note_kept_local_when_doc_unset(
+    session, google, fake_classify, notes
+):
+    """NOTES_DOC_ID unset → note kept local, warning logged, no Google write."""
     _set(fake_classify, "note", 0.9, note_text="vsauce entropy video")
     state = run(router_svc.route_entry(session, _entry(session, "remember vsauce")))
     assert state == KEPT_NOTE
-    assert google.calls == []  # no Google write of any kind
+    assert google.calls == []  # no task write of any kind
+    assert notes["insert"] == []  # no Docs write either
+
+
+def test_high_conf_note_writes_verbatim_to_doc(
+    session, google, fake_classify, notes, monkeypatch
+):
+    """NOTES_DOC_ID set + ancestry OK → exactly one Docs insert, body VERBATIM
+    (bullets as literal text), H3 timestamp heading; no task write."""
+    monkeypatch.setenv("NOTES_DOC_ID", "DOC1")
+    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
+    notes["parents"]["DOC1"] = ["FOLDER1"]  # doc lives directly in the folder
+    _set(fake_classify, "note", 0.95, note_text="cleaned — but body must be verbatim")
+    body = "- strategy idea\n  - sub point\n- another line"
+    state = run(router_svc.route_entry(session, _entry(session, body)))
+    assert state == KEPT_NOTE
+    assert len(notes["insert"]) == 1
+    doc_id, heading, written = notes["insert"][0]
+    assert doc_id == "DOC1"
+    assert written == body  # verbatim — bullets/indentation preserved
+    assert heading.endswith("IST")
+    assert "insert_task" not in google.names()
+
+
+def test_note_ancestry_gate_rejects_doc_outside_folder(
+    session, google, fake_classify, notes, monkeypatch
+):
+    """A doc whose parents don't reach NOTES_FOLDER_ID is rejected fail-closed —
+    no insert, entry left re-routable."""
+    monkeypatch.setenv("NOTES_DOC_ID", "DOC2")
+    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
+    notes["parents"]["DOC2"] = ["SOME_OTHER_FOLDER"]
+    _set(fake_classify, "note", 0.95, note_text="x")
+    entry = _entry(session, "note outside the folder")
+    with pytest.raises(ApiError):
+        run(router_svc.route_entry(session, entry))
+    assert notes["insert"] == []
+    session.expire_all()
+    assert session.get(ScratchEntry, entry.id).routing_state == UNROUTED
+
+
+def test_note_docs_failure_leaves_entry_unrouted(
+    session, google, fake_classify, notes, monkeypatch
+):
+    """A Docs write failure surfaces (never swallowed) and leaves the entry
+    re-routable — route-once marks routed only on a successful append."""
+    monkeypatch.setenv("NOTES_DOC_ID", "DOC3")
+    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
+    notes["parents"]["DOC3"] = ["FOLDER1"]
+
+    async def _boom(doc_id, heading, body):
+        raise RuntimeError("docs down")
+
+    monkeypatch.setattr("app.google.docs.insert_note", _boom)
+    _set(fake_classify, "note", 0.95, note_text="x")
+    entry = _entry(session, "boom note")
+    with pytest.raises(ApiError):
+        run(router_svc.route_entry(session, entry))
+    session.expire_all()
+    assert session.get(ScratchEntry, entry.id).routing_state == UNROUTED
 
 
 def test_event_goes_to_review_no_writes(session, google, fake_classify):
@@ -229,9 +313,9 @@ def test_route_unrouted_tally_then_noop(session, google, fake_classify):
 # ── THE GUARDRAIL ─────────────────────────────────────────────────────────────
 
 
-def test_router_never_calls_delete_or_status(session, google, fake_classify):
+def test_router_never_calls_delete_or_status(session, google, fake_classify, notes):
     """Drive every routing destination; assert delete_task and the status/complete
-    write are NEVER called — the create-only blast-radius contract, dynamically."""
+    write are NEVER called — the insert-only blast-radius contract, dynamically."""
     scenarios = [
         ("task", 0.95, {"title": "t", "due_date": "2026-06-20"}),
         ("task", 0.3, {"title": "t"}),
@@ -249,9 +333,10 @@ def test_router_never_calls_delete_or_status(session, google, fake_classify):
     assert google.names().count("insert_task") == 1  # the one high-conf task
 
 
-def test_router_write_dependency_set_is_create_only():
+def test_router_write_dependency_set_is_insert_only():
     """Statically: every `writes_svc.<fn>(...)` call reachable in the router service
-    is in {create_task, reschedule}. No destructive writer is even referenced."""
+    is in {create_task, reschedule, append_note} (goal 7). No destructive writer —
+    no delete_task, status write, update_content, or Docs overwrite — is referenced."""
     tree = ast.parse(inspect.getsource(router_svc))
     called = set()
     for node in ast.walk(tree):
@@ -262,7 +347,26 @@ def test_router_write_dependency_set_is_create_only():
             and node.func.value.id == "writes_svc"
         ):
             called.add(node.func.attr)
-    assert called == {"create_task", "reschedule"}, called
+    assert called == {"create_task", "reschedule", "append_note"}, called
+
+
+def test_docs_module_write_surface_is_insert_only():
+    """Statically: the Docs/Drive client never deletes a file or does a
+    content-overwriting `files().update` — the only mutations are the insert-only
+    `documents().batchUpdate` and the single sanctioned `files().create` (bootstrap).
+    Drive-access-scoping ADR, layer 5."""
+    from app.google import docs as docs_mod
+
+    tree = ast.parse(inspect.getsource(docs_mod))
+    called_methods = {
+        n.func.attr
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    assert "delete" not in called_methods, called_methods
+    assert "update" not in called_methods, called_methods  # no files().update overwrite
+    assert "batchUpdate" in called_methods  # the insert-only note write
+    assert "create" in called_methods  # the one sanctioned file-create (bootstrap)
 
 
 # ── Write-failure leaves the entry re-routable ────────────────────────────────
@@ -408,3 +512,74 @@ def test_eval_score_catches_task_false_positive():
     card = score(results)
     assert card["task_false_positives"] == 1
     assert card["passed"] is False
+
+
+# ── Notes writer: heading + insert-at-top (goal 7, no API) ─────────────────────
+
+
+def test_format_note_heading_locked_format():
+    from datetime import datetime
+
+    from app.writes.service import format_note_heading
+
+    assert (
+        format_note_heading(datetime(2026, 7, 6, 20, 41)) == "6-July-2026, 8:41 PM IST"
+    )
+    assert (
+        format_note_heading(datetime(2026, 1, 9, 0, 5))
+        == "9-January-2026, 12:05 AM IST"
+    )
+    assert (
+        format_note_heading(datetime(2026, 12, 25, 12, 0))
+        == "25-December-2026, 12:00 PM IST"
+    )
+
+
+def test_insert_note_puts_h3_timestamp_at_top(monkeypatch):
+    """The batchUpdate inserts at index 1 (top of body), heading first with an H3
+    paragraph style — newest note lands above everything else."""
+    from app.google import docs as docs_mod
+
+    captured = {}
+
+    class FakeDocs:
+        def documents(self):
+            return self
+
+        def batchUpdate(self, documentId, body):
+            captured["documentId"] = documentId
+            captured["requests"] = body["requests"]
+            return self
+
+        def execute(self):
+            return {}
+
+    monkeypatch.setattr(docs_mod, "_docs_service", lambda: FakeDocs())
+    run(docs_mod.insert_note("DOC", "6-July-2026, 8:41 PM IST", "- a\n- b"))
+
+    reqs = captured["requests"]
+    assert captured["documentId"] == "DOC"
+    assert reqs[0]["insertText"]["location"]["index"] == 1
+    assert reqs[0]["insertText"]["text"].startswith("6-July-2026, 8:41 PM IST\n")
+    assert reqs[0]["insertText"]["text"].endswith("- a\n- b\n")  # verbatim body
+    assert reqs[1]["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"] == (
+        "HEADING_3"
+    )
+    assert reqs[1]["updateParagraphStyle"]["range"]["startIndex"] == 1
+
+
+def test_confirm_as_note_review_writes_to_doc(
+    session, google, fake_classify, notes, monkeypatch
+):
+    """Confirm-as-note in review fires exactly one Docs append (the panel copy now
+    promises this)."""
+    monkeypatch.setenv("NOTES_DOC_ID", "DOC1")
+    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
+    notes["parents"]["DOC1"] = ["FOLDER1"]
+    _set(fake_classify, "unknown", 0.1)  # lands in review
+    run(router_svc.route_entry(session, _entry(session, "- a stray thought")))
+    item = session.exec(select(ReviewItem)).first()
+    res = run(router_svc.confirm_review(session, item.id, destination="note"))
+    assert res["entry_state"] == KEPT_NOTE
+    assert len(notes["insert"]) == 1
+    assert notes["insert"][0][2] == "- a stray thought"  # verbatim entry text

@@ -8,17 +8,28 @@ in `app.google.tasks`; merge/group helpers live in `app.overlay.service`. See
 
 from __future__ import annotations
 
+import logging
+import zoneinfo
+from datetime import datetime
 from typing import Any
 
 from sqlmodel import Session
 
 from app.errors import ApiError
+from app.google import docs as docs_client
 from app.google import tasks as tasks_client
 from app.overlay import service as overlay_svc
 from app.overlay.models import TaskOverlay
 
 _NO_DATE = "NO_DATE"
 _UNSET: Any = object()
+
+_log = logging.getLogger("writes.service")
+_IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+
+# Docs whose folder-ancestry has been verified once — the gate is idempotent and a
+# doc can't leave its folder mid-process, so we cache the confirmation per doc id.
+_ancestry_ok: set[str] = set()
 
 
 async def reschedule(
@@ -293,3 +304,95 @@ async def rename_list(tasklist_id: str, title: str) -> dict:
         raise ApiError(
             502, "google_write_failed", "Could not rename the list."
         ) from exc
+
+
+# ── Notes writer (goal 7) ──────────────────────────────────────────────────────
+#
+# The second live Google surface: the auto-router appends a captured note VERBATIM
+# to the top of one configured Doc. Insert-only — no delete, no overwrite, no status
+# write. `append_note` is a **router-only** caller (writes.md); doc/folder ids come
+# from config, never from LLM output. See docs/goals/architecture/drive-access-scoping.md.
+
+
+def format_note_heading(dt: datetime) -> str:
+    """The locked timestamp format, e.g. `6-July-2026, 8:41 PM IST`.
+
+    Built from date/time components (not `%-d`/`%-I`) so it is identical on macOS
+    and Linux. `dt` is expected in IST; its wall-clock components are used as-is.
+    """
+    hour = dt.hour % 12 or 12
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{dt.day}-{dt.strftime('%B')}-{dt.year}, {hour}:{dt.minute:02d} {ampm} IST"
+
+
+async def _assert_in_notes_folder(doc_id: str, folder_id: str | None) -> None:
+    """Folder-ancestry gate: verify `doc_id`'s parent chain reaches `folder_id`.
+
+    Fail-closed — a missing folder id, an unreachable doc, or an error anywhere in
+    the walk means we do NOT write (the caller leaves the entry re-routable). Cached
+    per doc id after the first success (a doc can't leave its folder mid-process).
+    """
+    if not folder_id:
+        raise ApiError(500, "notes_folder_unset", "NOTES_FOLDER_ID is not configured.")
+    if doc_id in _ancestry_ok:
+        return
+    try:
+        reached = await _walk_to_folder(doc_id, folder_id)
+    except Exception as exc:
+        raise ApiError(
+            502,
+            "notes_ancestry_check_failed",
+            "Could not verify the notes Doc's folder.",
+        ) from exc
+    if not reached:
+        raise ApiError(
+            422,
+            "notes_doc_outside_folder",
+            "The configured NOTES_DOC_ID is not inside NOTES_FOLDER_ID.",
+        )
+    _ancestry_ok.add(doc_id)
+
+
+async def _walk_to_folder(file_id: str, folder_id: str, max_depth: int = 10) -> bool:
+    """Walk up `file_id`'s parents (bounded) looking for `folder_id`.
+
+    The common case — a bootstrap-created doc sitting directly in the folder —
+    resolves on the first hop. Deeper nesting relies on the intermediate folders
+    being app-visible; if a hand-made ancestor is unreadable the walk raises and
+    the gate fails closed (correct: we couldn't prove containment)."""
+    seen: set[str] = set()
+    frontier = [file_id]
+    for _ in range(max_depth):
+        parents: list[str] = []
+        for fid in frontier:
+            if fid in seen:
+                continue
+            seen.add(fid)
+            parents.extend(await docs_client.get_parents(fid))
+        if folder_id in parents:
+            return True
+        if not parents:
+            return False
+        frontier = parents
+    return False
+
+
+async def append_note(doc_id: str, folder_id: str | None, body_text: str) -> dict:
+    """Append a verbatim note to the top of the configured Doc under an H3 timestamp.
+
+    Router-only write. Insert-only — never deletes or overwrites the Doc. The
+    ancestry gate runs first (fail-closed); a Docs error is surfaced as an ApiError
+    so the entry stays re-routable (route-once marks routed only on success).
+    """
+    await _assert_in_notes_folder(doc_id, folder_id)
+    heading = format_note_heading(datetime.now(_IST))
+    try:
+        await docs_client.insert_note(doc_id, heading, body_text)
+    except ApiError:
+        raise
+    except Exception as exc:
+        raise ApiError(
+            502, "google_docs_write_failed", "Could not append the note to the Doc."
+        ) from exc
+    _log.info("appended note to Doc %s under heading %r", doc_id, heading)
+    return {"doc_id": doc_id, "heading": heading}

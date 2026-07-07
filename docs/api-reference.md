@@ -35,7 +35,13 @@ An append-only capture box files a dumped thought to the right place. A captured
 through the **only runtime LLM in the system** (`app.router.classifier`) — a small/cheap model
 (`claude-haiku-4-5`) that returns a schema-validated `{destination, confidence, fields}`.
 **Deterministic code does every write** (`app.router.service`); the LLM never writes. The router's
-Google-write surface is **create-only** (`create_task` + the date path) — never delete/complete.
+entire Google-write surface is **insert-only** — `{create_task, reschedule, append_note}` — never a
+delete, status write, content edit, or Docs overwrite.
+
+The **capture box is a bullet pad** (goal 7): `- ` starts a bullet, Enter continues it at the same
+indent (Enter on an empty bullet exits the list), Tab / Shift+Tab indent/outdent, and **Shift+Enter
+(or Cmd/Ctrl+Enter) captures the whole editor as one entry** and clears it. It's a plain `<textarea>`
+— the value is captured verbatim (bullets as literal text).
 
 - `POST /scratch` `{text}` — append a capture (append-only; never edits/deletes prior entries).
 - `GET /scratch` — recent entries with their routing state (`unrouted` / `routed_task` /
@@ -45,7 +51,16 @@ Google-write surface is **create-only** (`create_task` + the date path) — neve
 - `GET /review` — pending review items (low-confidence / `event` / `unknown` — calendar is
   read-only v1, so events go to review for a manual add).
 - `POST /review/{id}/confirm` `{destination?, fields?}` — confirm (edit-then-confirm); a `task`
-  fires exactly one `create_task`. `POST /review/{id}/dismiss` — writes nothing.
+  fires exactly one `create_task`, a `note` fires exactly one `append_note`.
+  `POST /review/{id}/dismiss` — writes nothing.
+
+**Notes → Google Doc (goal 7).** A high-confidence `note` is appended **verbatim** to the top of one
+configured Doc (`NOTES_DOC_ID`) under a Heading-3 timestamp (`6-July-2026, 8:41 PM IST`), newest
+first — insert-only. Unset `NOTES_DOC_ID` → the note stays kept-local with a logged warning. Drive
+access is **`drive.file`-scoped** with a folder-ancestry gate + startup scope assertion (ADR
+`docs/goals/architecture/drive-access-scoping.md`); doc/folder IDs are config-only. Setup:
+[goals/goal-7-owner-steps.md](goals/goal-7-owner-steps.md). Bootstrap the Doc with
+`uv run python -m app.google.bootstrap`.
 
 A periodic in-process job auto-routes unrouted entries (no Celery). Disable with
 `ROUTER_SCHEDULER_ENABLED=0`; tune the cadence with `ROUTER_SCHEDULER_INTERVAL` (seconds).

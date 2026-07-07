@@ -4,10 +4,11 @@ The classifier returns a `RouterClassification`; THIS module decides what happen
 and performs (or withholds) the write. The safety contract lives in router.md:
 
 - **LLM-proposes-code-disposes:** no write lives in the classifier; every write is here.
-- **Create-only blast radius:** the only Google task writes reachable from routing are
-  `create_task` (content) and `reschedule` (the g4a date path for the new task's due
-  date). The router NEVER calls `delete_task`, the complete/uncomplete status write, or
-  `update_content` — it is *not* a sanctioned `delete_task` caller (writes.md).
+- **Insert-only blast radius:** the only Google writes reachable from routing are
+  `create_task` (content) + `reschedule` (the g4a date path) for tasks, and
+  `append_note` (goal 7, insert-only into the notes Doc) for notes. The router NEVER
+  calls `delete_task`, the complete/uncomplete status write, `update_content`, or any
+  Docs delete/overwrite — it is *not* a sanctioned `delete_task` caller (writes.md).
 - **Confidence gate / schema gate / allowed-destination gate:** below threshold, or
   `unknown`/`event`, never auto-writes — it goes to the review queue.
 - **Route-once:** routing flips `routing_state` off `UNROUTED`, so a re-run no-ops.
@@ -16,6 +17,8 @@ and performs (or withholds) the write. The safety contract lives in router.md:
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime, timezone
 
 from sqlmodel import Session, select
@@ -40,8 +43,42 @@ from app.router.schema import RouterFields
 from app.writes import service as writes_svc
 
 
+_log = logging.getLogger("router.service")
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _notes_doc_config() -> tuple[str | None, str | None]:
+    """Resolve the notes Doc + parent folder ids from config (env) — never the LLM.
+
+    IDs are config-only (ADR: drive-access-scoping): the router proposes a
+    destination *class*; deterministic code picks the doc.
+    """
+    return os.environ.get("NOTES_DOC_ID"), os.environ.get("NOTES_FOLDER_ID")
+
+
+async def _dispose_note(session: Session, entry: ScratchEntry) -> str:
+    """Dispose a high-confidence `note`: write it VERBATIM to the top of the Doc if
+    `NOTES_DOC_ID` is set, else keep it local (logged warning). Returns KEPT_NOTE.
+
+    A Docs failure raises (entry left re-routable, rollback) so route-once only marks
+    the entry routed after a successful append — same contract as the task path.
+    """
+    doc_id, folder_id = _notes_doc_config()
+    if doc_id:
+        try:
+            await writes_svc.append_note(doc_id, folder_id, entry.text)
+        except ApiError:
+            session.rollback()
+            raise
+    else:
+        _log.warning(
+            "NOTES_DOC_ID unset — note kept local (entry %s), not written to a Doc.",
+            entry.id,
+        )
+    return KEPT_NOTE
 
 
 async def _resolve_list_id(list_hint: str | None) -> str:
@@ -134,7 +171,7 @@ async def route_entry(session: Session, entry: ScratchEntry) -> str:
             raise
         entry.routing_state = ROUTED_TASK
     elif dest == "note" and above:
-        entry.routing_state = KEPT_NOTE
+        entry.routing_state = await _dispose_note(session, entry)
     else:
         if dest in ("task", "note"):
             reason = f"low confidence ({conf:.2f}) for {dest}"
@@ -200,7 +237,7 @@ async def confirm_review(
             raise
         entry.routing_state = ROUTED_TASK
     elif dest == "note":
-        entry.routing_state = KEPT_NOTE
+        entry.routing_state = await _dispose_note(session, entry)
     else:
         # event / unknown: acknowledged, no write (calendar read-only v1).
         entry.routing_state = RESOLVED
