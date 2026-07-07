@@ -877,15 +877,37 @@ export function useTasksPanel() {
   );
 
   // Set / change / clear an arbitrary due date via the picker. Reuses the g4
-  // reschedule endpoint (no new endpoint). Optimistically removes the row, then
-  // silently refetches so it re-buckets correctly — including dates with no
-  // existing bucket and the Overdue rollup (which drag cannot reach).
+  // reschedule endpoint (no new endpoint). Fully optimistic on BOTH ends: remove
+  // the row from its old bucket AND drop it into its new date-bucket immediately
+  // (client-side bucketing, so it never blinks out while the Google write is in
+  // flight), then silently refetch to settle exact order + the Overdue rollup.
   const setDueDate = useCallback(
     (listId: string, taskId: string, dueDate: string | null) => {
       let snapshot: TaskList[] | null = null;
       setState((prev) => {
         snapshot = prev.taskLists;
-        return removeTaskFromList(prev, listId, taskId);
+        let moved: Task | null = null;
+        const list = prev.taskLists.find((l) => l.id === listId);
+        if (list) {
+          for (const b of list.buckets) {
+            const found = findTaskInItems(b.items, taskId);
+            if (found) {
+              moved = found;
+              break;
+            }
+          }
+        }
+        const removed = removeTaskFromList(prev, listId, taskId);
+        if (!moved) return removed;
+        const updated: Task = {
+          ...moved,
+          due: dueDate ? `${dueDate}T00:00:00.000Z` : null,
+          group_id: null, // the picker moves the task out of any group
+          rank: null,
+        };
+        // insertMovedTask buckets by the task's due (NO_DATE / a date / Overdue)
+        // and creates the bucket if the list doesn't have it yet.
+        return insertMovedTask(removed, listId, updated);
       });
       apiPost(`/tasks/${listId}/${taskId}/reschedule`, {
         due_date: dueDate,
@@ -990,16 +1012,17 @@ export function useTasksPanel() {
   );
 
   // Move a task to another list via the menu (insert + delete on the backend).
-  // Optimistic on BOTH sides (g4a fix): remove from the source immediately, and
-  // on success insert the moved task into the destination from the move response
-  // (its new id) — the g3 insert-from-response pattern, NOT a refetch (the old
-  // refetch was the ~2-3s destination lag). Rollback + toast on failure.
+  // Fully optimistic: remove from the source AND drop the task into the
+  // destination immediately with a temp id (the backend mints the real id on the
+  // insert leg), then reconcile that id on success — so the task never blinks out
+  // while the Google write is in flight. Rollback + toast on failure.
   const moveTaskToList = useCallback(
     (listId: string, taskId: string, targetListId: string) => {
       let snapshot: TaskList[] | null = null;
-      let moved: Task | null = null;
+      const tempId = `temp-move-${Date.now()}`;
       setState((prev) => {
         snapshot = prev.taskLists;
+        let moved: Task | null = null;
         const list = prev.taskLists.find((l) => l.id === listId);
         if (list) {
           for (const b of list.buckets) {
@@ -1010,7 +1033,10 @@ export function useTasksPanel() {
             }
           }
         }
-        return removeTaskFromList(prev, listId, taskId);
+        const removed = removeTaskFromList(prev, listId, taskId);
+        if (!moved) return removed;
+        const optimistic: Task = { ...moved, id: tempId, group_id: null };
+        return insertMovedTask(removed, targetListId, optimistic);
       });
 
       apiPost<{ new_task_id: string; rank: number | null }>(
@@ -1018,14 +1044,12 @@ export function useTasksPanel() {
         { target_list_id: targetListId },
       )
         .then((res) => {
-          if (!moved) return;
-          const inserted: Task = {
-            ...(moved as Task),
-            id: res.new_task_id,
-            rank: res.rank,
-            group_id: null,
-          };
-          setState((s) => insertMovedTask(s, targetListId, inserted));
+          setState((s) =>
+            updateTaskFields(s, targetListId, tempId, {
+              id: res.new_task_id,
+              rank: res.rank,
+            }),
+          );
         })
         .catch((err: Error) => {
           setState((s) => ({
@@ -1058,9 +1082,10 @@ export function useTasksPanel() {
       newRank: number,
     ) => {
       let snapshot: TaskList[] | null = null;
-      let moved: Task | null = null;
+      const tempId = `temp-move-${Date.now()}`;
       setState((prev) => {
         snapshot = prev.taskLists;
+        let moved: Task | null = null;
         const list = prev.taskLists.find((l) => l.id === srcListId);
         if (list) {
           for (const b of list.buckets) {
@@ -1071,7 +1096,34 @@ export function useTasksPanel() {
             }
           }
         }
-        return removeTaskFromList(prev, srcListId, taskId);
+        let next = removeTaskFromList(prev, srcListId, taskId);
+        if (moved) {
+          const newDue =
+            dueDate === undefined
+              ? moved.due
+              : dueDate === null
+                ? null
+                : `${dueDate}T00:00:00.000Z`;
+          // Drop the task into the destination at the exact drop position NOW,
+          // with a temp id (the backend mints the real id on the insert leg), so
+          // it doesn't blink out of the destination while the write is in flight.
+          const optimistic: Task = {
+            ...moved,
+            id: tempId,
+            due: newDue,
+            rank: newRank,
+            group_id: destGroupId,
+          };
+          next = insertTaskIntoListBucket(
+            next,
+            targetListId,
+            destBucketKey,
+            optimistic,
+            destGroupId,
+            destIndex,
+          );
+        }
+        return next;
       });
 
       const body: Record<string, unknown> = {
@@ -1089,29 +1141,14 @@ export function useTasksPanel() {
         group_id: number | null;
       }>(`/tasks/${srcListId}/${taskId}/move`, body)
         .then((res) => {
-          if (!moved) return;
-          const newDue =
-            dueDate === undefined
-              ? (moved as Task).due
-              : dueDate === null
-                ? null
-                : `${dueDate}T00:00:00.000Z`;
-          const inserted: Task = {
-            ...(moved as Task),
-            id: res.new_task_id,
-            due: newDue,
-            rank: res.rank,
-            group_id: res.group_id,
-          };
+          // Reconcile the optimistic temp row with the server's new task id
+          // (works whether it landed standalone or inside a group).
           setState((s) =>
-            insertTaskIntoListBucket(
-              s,
-              targetListId,
-              destBucketKey,
-              inserted,
-              destGroupId,
-              destIndex,
-            ),
+            updateTaskFields(s, targetListId, tempId, {
+              id: res.new_task_id,
+              rank: res.rank,
+              group_id: res.group_id,
+            }),
           );
         })
         .catch((err: Error) => {

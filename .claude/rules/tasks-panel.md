@@ -202,6 +202,35 @@ failure. The `move` backend write is the g4 layer extended with `due_date`/`grou
 
 ---
 
+## Goal 7a — eager destination inserts + calmer list styling
+
+### Destination is now optimistic too (was: insert-on-response)
+g4a/g6 removed the row from the source immediately but only placed it in the **destination** once
+the Google write returned — a visible few-seconds gap where the task existed nowhere. g7a closes
+that gap for the three "task changes bucket/list" paths by inserting into the destination **inside
+the same `setState`** as the source removal:
+- **`setDueDate`** (picker) — re-buckets the row client-side via `insertMovedTask(removed, listId,
+  updated)` (`bucketKeyForDue` handles NO_DATE / a date / the Overdue rollup, creating the bucket if
+  absent), then still `refetchSilently()` to settle exact order.
+- **`moveTaskToList`** (menu) and **`moveTaskCrossList`** (pinned-pair drag) — the backend mints a
+  **new** task id on the insert leg, so the optimistic row goes in with a `temp-move-{ts}` id and is
+  reconciled to `res.new_task_id` on success via **`updateTaskFields`** (patches the id in place,
+  whether the row landed standalone or inside a group). Rollback restores the pre-op snapshot.
+
+Keep this shape for any future bucket/list mutation: never let a task blink out while a Google write
+is in flight. Groups still never span buckets or lists (unchanged — a deliberate constraint, not a
+bug).
+
+### Styling: fewer lines, no group box
+Per-row bottom dividers were dropped from tasks and group wrappers (`.panel li.task-item`,
+`.panel li.group-item-wrapper { border-bottom: none }` out-specify the base `.panel li`). Group
+containers lost their border/radius/fill in favour of a soft-blue **left rail** (`.group-container`
+`border-left`), matching the date-urgency left-edge language; the header divider is gone too. The
+`⋯` menu still portals to `<body>` (the group's `overflow:hidden` is now `visible`, but the portal
+stays — it also dodges the column's `overflow-y:auto` scroll clip).
+
+---
+
 ## Bug log — what broke, why, and what fixed it
 
 ### 1. Groups can only be dragged once
