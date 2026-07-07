@@ -79,6 +79,11 @@ class RescheduleRequest(BaseModel):
 class MoveRequest(BaseModel):
     target_list_id: str
     rank: Optional[float] = None
+    # Goal 6 cross-list drag: an omitted due_date preserves the source due; an
+    # explicit value (or null → NO_DATE) reschedules on the insert leg. group_id
+    # names the destination group (validated against the dest bucket) or null.
+    due_date: Optional[str] = None
+    group_id: Optional[int] = None
 
 
 @router.post("/tasks/{tasklist_id}/{task_id}/reschedule")
@@ -105,12 +110,15 @@ async def move_task(
     body: MoveRequest,
     session: Session = Depends(get_session),
 ):
+    fields = body.model_fields_set
     return await writes_svc.move(
         session,
         tasklist_id=tasklist_id,
         task_id=task_id,
         target_list_id=body.target_list_id,
         rank=body.rank,
+        due_date=body.due_date if "due_date" in fields else writes_svc._UNSET,
+        group_id=body.group_id,
     )
 
 

@@ -357,6 +357,55 @@ function insertMovedTask(
   };
 }
 
+/**
+ * Insert a task into a SPECIFIC bucket of a destination list, at a group + index
+ * resolved by the drag handler (goal 6 cross-list drag). Unlike `insertMovedTask`
+ * (menu path, tops the due-date bucket), this honours the exact drop position and
+ * group. Creates the bucket if the destination list doesn't have it yet.
+ */
+function insertTaskIntoListBucket(
+  state: TasksPanelState,
+  targetListId: string,
+  bucketKey: string,
+  task: Task,
+  destGroupId: number | null,
+  destIndex: number,
+): TasksPanelState {
+  return {
+    ...state,
+    taskLists: state.taskLists.map((list) => {
+      if (list.id !== targetListId) return list;
+      const idx = list.buckets.findIndex((b) => b.key === bucketKey);
+      if (idx === -1) {
+        const bucket: Bucket = {
+          label: bucketLabelForKey(bucketKey),
+          key: bucketKey,
+          items: insertTaskIntoItems([], task, destGroupId, destIndex),
+        };
+        return bucketKey === "OVERDUE"
+          ? { ...list, buckets: [bucket, ...list.buckets] }
+          : { ...list, buckets: [...list.buckets, bucket] };
+      }
+      return {
+        ...list,
+        buckets: list.buckets.map((b) =>
+          b.key === bucketKey
+            ? {
+                ...b,
+                items: insertTaskIntoItems(
+                  b.items,
+                  task,
+                  destGroupId,
+                  destIndex,
+                ),
+              }
+            : b,
+        ),
+      };
+    }),
+  };
+}
+
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useTasksPanel() {
@@ -989,10 +1038,98 @@ export function useTasksPanel() {
     [],
   );
 
+  // Cross-list drag (goal 6): move a task between the two pinned lists in one
+  // gesture. Reuses the g4 `move` write layer, now extended so a drop onto a
+  // different date-bucket (dueDate) or into a group (destGroupId) rides the same
+  // orchestrated backend write. Optimistic on both sides — remove from the source
+  // now, insert into the destination at the precise drop position on success;
+  // snapshot-rollback + toast on failure.
+  //   dueDate: undefined = preserve source due (same-bucket drop); null = clear
+  //   (NO_DATE); "YYYY-MM-DD" = set the destination bucket's date.
+  const moveTaskCrossList = useCallback(
+    (
+      srcListId: string,
+      taskId: string,
+      targetListId: string,
+      destBucketKey: string,
+      dueDate: string | null | undefined,
+      destGroupId: number | null,
+      destIndex: number,
+      newRank: number,
+    ) => {
+      let snapshot: TaskList[] | null = null;
+      let moved: Task | null = null;
+      setState((prev) => {
+        snapshot = prev.taskLists;
+        const list = prev.taskLists.find((l) => l.id === srcListId);
+        if (list) {
+          for (const b of list.buckets) {
+            const found = findTaskInItems(b.items, taskId);
+            if (found) {
+              moved = found;
+              break;
+            }
+          }
+        }
+        return removeTaskFromList(prev, srcListId, taskId);
+      });
+
+      const body: Record<string, unknown> = {
+        target_list_id: targetListId,
+        rank: newRank,
+        group_id: destGroupId,
+      };
+      // Only send due_date when the bucket changed — omitting it preserves the
+      // source due (backend _UNSET semantics). null explicitly clears it.
+      if (dueDate !== undefined) body.due_date = dueDate;
+
+      apiPost<{
+        new_task_id: string;
+        rank: number | null;
+        group_id: number | null;
+      }>(`/tasks/${srcListId}/${taskId}/move`, body)
+        .then((res) => {
+          if (!moved) return;
+          const newDue =
+            dueDate === undefined
+              ? (moved as Task).due
+              : dueDate === null
+                ? null
+                : `${dueDate}T00:00:00.000Z`;
+          const inserted: Task = {
+            ...(moved as Task),
+            id: res.new_task_id,
+            due: newDue,
+            rank: res.rank,
+            group_id: res.group_id,
+          };
+          setState((s) =>
+            insertTaskIntoListBucket(
+              s,
+              targetListId,
+              destBucketKey,
+              inserted,
+              destGroupId,
+              destIndex,
+            ),
+          );
+        })
+        .catch((err: Error) => {
+          setState((s) => ({
+            ...s,
+            taskLists: snapshot ?? s.taskLists,
+            writeError: `Move failed: ${err.message}`,
+          }));
+        });
+    },
+    [],
+  );
+
   return {
     ...state,
     reorderTask,
     moveTask,
+    moveTaskCrossList,
     reorderGroup,
     createGroup,
     renameGroup,

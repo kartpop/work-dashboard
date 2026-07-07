@@ -16,6 +16,13 @@ Both must be running before you drive either surface.
   already at head).
 - Node deps installed: `cd frontend && npm install` (skip if `node_modules/` exists and
   `package.json` hasn't changed).
+- Playwright ready (for the GUI surface): the `playwright` package is a backend **dev
+  dependency** (in `pyproject.toml` / `uv.lock`), so `uv sync` installs it. The **browser binary
+  is NOT in the lockfile** — run `cd backend && uv run playwright install chromium` once per
+  machine (and again after a `playwright` version bump, since the required Chromium build is
+  pinned to the package version). Verify with `uv run python -c "from playwright.sync_api import
+  sync_playwright"`. NOTE: this fixes local runs; a restricted agent sandbox may still block a
+  browser launch — fall back to a main-session / manual pass there.
 
 ## Launch
 

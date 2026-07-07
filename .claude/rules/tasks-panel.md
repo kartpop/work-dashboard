@@ -148,6 +148,60 @@ nesting UI; a `parent` task is never dropped or duplicated (it's just another fl
 
 ---
 
+## Goal 6 — shared DndContext across the pinned pair (cross-list drag)
+
+### One DndContext can now span TWO lists (was: one per list)
+g4 lifted the `DndContext` to one-per-list. g6 introduces **`DndListGroup`**, which wraps
+**one _or_ two** lists under a single `DndContext` + one shared `handleDragEnd`:
+- **`PinnedTasksRow`** renders the two pinned lists (matched by title, `PINNED_LIST_TITLES`)
+  inside **one** `DndListGroup` → a task can be dragged *between* them.
+- **`OtherTasksSection`** renders each non-pinned list in its **own** single-list `DndListGroup`
+  → the cross-list branch never fires, so their behavior is byte-for-byte the g4 per-list one.
+
+`TaskListColumn` is the presentational half (header rename + add-task + `BucketSection`s); it no
+longer owns a context. `DndListGroup` is **children-based** (goal 6a): it owns the sensors +
+`handleDragEnd` over its `lists` prop, but the CALLER renders the columns as `children`. `DndContext`
+emits no DOM, so those children are direct grid items of the parent grid — which lets a
+`ResizeHandle` sit as a sibling *between* the two pinned columns. `PinnedTasksRow` builds that grid
+(`.top-row-resizable`: 3 columns + 2 handles, default 30/30/40 `fr`, ephemeral widths) and also
+holds the scratchpad column (passed in as a `scratchpad` prop). `OtherTasksSection` renders each
+list as `<DndListGroup lists={[list]}><TaskListColumn/></DndListGroup>` — single-list, cross-list
+branch never fires (g4 behavior). Pinned columns get `compactDates` (per-row date → picker icon
+only; date lives in the bucket header via `bucketHeading`).
+
+### Sortable/droppable IDs must be globally unique across the shared context
+Task ids (Google strings) and `group-{id}` (global DB PK) are already unique. **Bucket droppable
+ids were NOT** — two lists both have a `Today` bucket. Fixed: the droppable id is now
+`bucket:{listId}:{bucketKey}` and carries `data:{listId, bucketKey}`; the handler reads the
+resolved list+bucket from `over.data.current` (not by parsing the id).
+
+### `handleDragEnd` resolves list first, then dispatches
+`findListAndBucket(lists, id)` finds the source list+bucket for `activeId`; the dest list+bucket
+come from `over.data.current` (bucket droppable) or `findListAndBucket(overId)`. Then:
+- **Group drag** — returns if `crossList` OR dest bucket ≠ src bucket (groups never span lists or
+  buckets); else the g3 reorder.
+- **`crossList` (dest list ≠ src list) → cross-list move branch:** compute `destGroupId` +
+  `dueDate` (`undefined` = preserve when dest bucket key == src bucket key; `null` for `NO_DATE`;
+  else the dest date key) + `destPlacement()` rank, then `tasks.moveTaskCrossList(...)`. Dropping
+  INTO `OVERDUE` is blocked (past dates go through the picker), same as reschedule.
+- **Same list, dest bucket ≠ src bucket** → the g4 reschedule branch (unchanged logic).
+- **Same list, same bucket** → the g3 reorder / move-into-group paths (unchanged).
+
+`destPlacement(movedTask)` is the shared "insert hypothetically, then midpoint" rank math used by
+both the cross-list and reschedule branches (`computeMidpointRank` for a bucket, `computeGroupTaskRank`
+for a group).
+
+### Cross-list move on the frontend (`moveTaskCrossList` in the hook)
+Optimistic on both sides: remove from the source immediately; POST `/move` with
+`{target_list_id, rank, group_id, due_date?}` (`due_date` omitted when the bucket is unchanged →
+backend preserves the source due); on success insert the returned `new_task_id` into the
+**destination bucket at the exact drop group+index** via `insertTaskIntoListBucket` (NOT
+`insertMovedTask`, which is the menu path that just tops the due-date bucket). Rollback + toast on
+failure. The `move` backend write is the g4 layer extended with `due_date`/`group_id` — see
+`.claude/rules/writes.md`.
+
+---
+
 ## Bug log — what broke, why, and what fixed it
 
 ### 1. Groups can only be dragged once

@@ -15,8 +15,11 @@ Google writes cover task metadata, task content, and list rename — rank/groupi
 - `POST /tasks/{list}/{task}/reschedule` `{due_date, rank?, group_id?}` — set/clear the Google due
   date (cross-bucket drag **or** the per-task date-picker); `due_date` is `YYYY-MM-DD` (IST) or
   `null` for no date.
-- `POST /tasks/{list}/{task}/move` `{target_list_id}` — move to another list (insert-then-delete;
-  the overlay row migrates to the new task id).
+- `POST /tasks/{list}/{task}/move` `{target_list_id, rank?, due_date?, group_id?}` — move to another
+  list (insert-then-delete; the overlay row migrates to the new task id). Cross-list drag (goal 6)
+  may also reschedule + regroup in the same write: an **omitted** `due_date` preserves the source
+  due, an explicit value (or `null` → `NO_DATE`) sets it on the insert leg; `group_id` names a
+  destination group (validated against the dest bucket, else 422).
 - `POST /tasks/{list}` `{title, rank?}` — create a task (lands undated → `NO_DATE`, top).
 - `PATCH /tasks/{list}/{task}` `{title?, notes?, status?}` — edit content; `status`
   `completed`/`needsAction` is complete/uncomplete. Only the fields sent are written.

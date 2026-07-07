@@ -300,6 +300,124 @@ def test_move_happy_path(client, google, session):
     assert new_row is not None and new_row.rank == 7.0 and new_row.group_id is None
 
 
+def test_move_with_due_date_reschedules_on_insert(client, google, session):
+    # Source is undated (NO_DATE); a cross-list drag onto the 2026-06-15 bucket
+    # must set that due on the INSERT leg (one write, no separate reschedule).
+    google.tasks[("L1", "T1")] = {
+        "id": "T1",
+        "title": "x",
+        "status": "needsAction",
+        "due": None,
+        "notes": None,
+    }
+    google.insert_result = {"id": "NEW1"}
+    resp = client.post(
+        "/tasks/L1/T1/move",
+        json={"target_list_id": "L2", "rank": 7.0, "due_date": "2026-06-15"},
+    )
+    assert resp.status_code == 200
+    inserts = [c for c in google.calls if c[0] == "insert_task"]
+    assert len(inserts) == 1 and inserts[0][2]["due"] == DUE_0615
+    # No separate update_due_date — the reschedule rides the insert body.
+    assert "update_due_date" not in google.names()
+
+
+def test_move_with_due_date_null_clears_due(client, google, session):
+    # A dated source dragged onto the destination's NO_DATE bucket → due omitted.
+    google.tasks[("L1", "T1")] = {
+        "id": "T1",
+        "title": "x",
+        "status": "needsAction",
+        "due": DUE_0615,
+        "notes": None,
+    }
+    google.insert_result = {"id": "NEW1"}
+    resp = client.post(
+        "/tasks/L1/T1/move",
+        json={"target_list_id": "L2", "rank": 1.0, "due_date": None},
+    )
+    assert resp.status_code == 200
+    inserts = [c for c in google.calls if c[0] == "insert_task"]
+    assert len(inserts) == 1 and "due" not in inserts[0][2]
+
+
+def test_move_omitted_due_preserves_source_due(client, google, session):
+    # No due_date key → the source due is carried over verbatim (menu-move parity).
+    google.tasks[("L1", "T1")] = {
+        "id": "T1",
+        "title": "x",
+        "status": "needsAction",
+        "due": DUE_0615,
+        "notes": None,
+    }
+    google.insert_result = {"id": "NEW1"}
+    resp = client.post("/tasks/L1/T1/move", json={"target_list_id": "L2", "rank": 1.0})
+    assert resp.status_code == 200
+    inserts = [c for c in google.calls if c[0] == "insert_task"]
+    assert inserts[0][2]["due"] == DUE_0615
+
+
+def test_move_into_group_in_dest_bucket_200(client, google, session):
+    google.tasks[("L1", "T1")] = {
+        "id": "T1",
+        "title": "x",
+        "status": "needsAction",
+        "due": None,
+        "notes": None,
+    }
+    google.insert_result = {"id": "NEW1"}
+    # A group in the DESTINATION list + destination bucket.
+    grp = TaskGroup(tasklist_id="L2", bucket_key="2026-06-15", name="g", rank=1.0)
+    session.add(grp)
+    session.commit()
+    session.refresh(grp)
+
+    resp = client.post(
+        "/tasks/L1/T1/move",
+        json={
+            "target_list_id": "L2",
+            "rank": 3.0,
+            "due_date": "2026-06-15",
+            "group_id": grp.id,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["group_id"] == grp.id
+    session.expire_all()
+    row = session.get(TaskOverlay, ("L2", "NEW1"))
+    assert row is not None and row.group_id == grp.id
+
+
+def test_move_group_wrong_bucket_422_no_writes(client, google, session):
+    google.tasks[("L1", "T1")] = {
+        "id": "T1",
+        "title": "x",
+        "status": "needsAction",
+        "due": None,
+        "notes": None,
+    }
+    # Group lives in a different bucket than the drop target → reject before any write.
+    grp = TaskGroup(tasklist_id="L2", bucket_key="2026-06-20", name="g", rank=1.0)
+    session.add(grp)
+    session.commit()
+    session.refresh(grp)
+
+    resp = client.post(
+        "/tasks/L1/T1/move",
+        json={
+            "target_list_id": "L2",
+            "rank": 3.0,
+            "due_date": "2026-06-15",
+            "group_id": grp.id,
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "group_wrong_bucket"
+    # Insert-before-delete never started; source overlay untouched.
+    assert "insert_task" not in google.names()
+    assert "delete_task" not in google.names()
+
+
 def test_move_same_list_400(client, google, session):
     resp = client.post("/tasks/L1/T1/move", json={"target_list_id": "L1"})
     assert resp.status_code == 400

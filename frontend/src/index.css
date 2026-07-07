@@ -39,7 +39,7 @@ h1, h2, h3 {
 }
 
 .dashboard {
-  max-width: 1100px;
+  max-width: 1600px;
   margin: 0 auto;
   padding: 24px;
 }
@@ -49,10 +49,118 @@ h1, h2, h3 {
   margin: 0 0 24px;
 }
 
-.panel-grid {
+/* ── Goal 6 layout: resizable top row + collapsed Other tasks ──────────────── */
+
+/* My Tasks | Follow-up | Scratchpad in ONE grid: three flexible columns (default
+   30/30/40, from the --w* vars set inline) with a draggable handle between each
+   adjacent pair. Handles are fixed-width gutters — no extra `gap`. */
+.top-row-resizable {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  grid-template-columns: var(--w0) var(--handle) var(--w1) var(--handle) var(--w2);
+  align-items: start;
+  margin-bottom: 24px;
+}
+
+/* Let each column shrink below its content's intrinsic width (so ellipsis +
+   wrapping kick in instead of the panel overflowing into its neighbour). */
+.top-row-resizable > * {
+  min-width: 0;
+}
+
+/* Below this width three columns are too cramped — stack them and hide the
+   handles (the inline vars only set the template via the media query above). */
+@media (max-width: 1080px) {
+  .top-row-resizable {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .top-row-resizable .resize-handle {
+    display: none;
+  }
+}
+
+/* The draggable column divider: a full-height hit target with a thin centred
+   bar that highlights on hover/drag. */
+.resize-handle {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.resize-handle-bar {
+  width: 2px;
+  margin: 10px 0;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background 0.12s ease;
+}
+
+.resize-handle:hover .resize-handle-bar,
+.resize-handle:active .resize-handle-bar {
+  background: var(--done);
+}
+
+/* A pinned column and the scratchpad share the same card footprint. */
+.task-column .list-title {
+  cursor: text;
+  margin: 0;
+}
+
+.pinned-missing {
+  min-height: 120px;
+}
+
+/* Pinned columns (My Tasks / Follow-up) hide the per-row date text — the bucket
+   header already carries the date — keeping only the calendar-picker icon so a
+   click still opens the date picker. WebKit/Chromium pseudo-elements. */
+.task-column--compact-dates .task-date {
+  width: 20px;
+  min-width: 20px;
+  padding: 1px 0;
+}
+
+.task-column--compact-dates .task-date::-webkit-datetime-edit,
+.task-column--compact-dates .task-date::-webkit-inner-spin-button,
+.task-column--compact-dates .task-date::-webkit-clear-button {
+  display: none;
+}
+
+.task-column--compact-dates .task-date::-webkit-calendar-picker-indicator {
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+/* Collapsed section holding every non-pinned list. */
+.other-tasks {
+  margin-bottom: 24px;
+}
+
+.other-tasks-toggle {
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text-h);
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.other-tasks-toggle:hover {
+  color: var(--text);
+}
+
+.other-lists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 20px;
+  margin-top: 12px;
 }
 
 .panel {

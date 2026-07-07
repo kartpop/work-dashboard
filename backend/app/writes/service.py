@@ -84,12 +84,22 @@ async def move(
     task_id: str,
     target_list_id: str,
     rank: float | None,
+    due_date: Any = _UNSET,
+    group_id: int | None = None,
 ) -> dict:
     """Move a task to another list via insert-before-delete.
 
     Inserts a copy into the target list, then (only on confirmed insert success)
     deletes the original and migrates the overlay row. A delete failure after a
     successful insert surfaces the duplicate rather than retrying or losing data.
+
+    Goal 6 (cross-list drag): the drop may also change the date bucket and land in
+    a destination group, so `move` optionally reschedules on the **insert leg** —
+    one orchestrated write, not two chained calls.
+      - `due_date is _UNSET` → preserve the source task's due (menu/same-bucket drop);
+        an explicit value (a "YYYY-MM-DD" str, or None to clear → NO_DATE) overrides it.
+      - `group_id` must reference a group in the destination `(target_list, bucket)`
+        (422 otherwise); it is set on the migrated overlay row (None = ungrouped).
     """
     if target_list_id == tasklist_id:
         raise ApiError(400, "same_list", "Task is already in that list.")
@@ -98,14 +108,35 @@ async def move(
     if src is None:
         raise ApiError(404, "task_not_found", "Task not found.")
 
+    # The destination bucket governs both group-scope validation and the insert's
+    # due. Preserve the source bucket when due_date is _UNSET; otherwise the
+    # explicit value (or NO_DATE for None) is the target.
+    if due_date is _UNSET:
+        target_bucket = overlay_svc._bucket_key(src.get("due"))
+    else:
+        target_bucket = due_date or _NO_DATE
+
+    if group_id is not None:
+        grp = overlay_svc.get_group(session, group_id, target_list_id)
+        if grp is None or grp.bucket_key != target_bucket:
+            raise ApiError(
+                422,
+                "group_wrong_bucket",
+                "group_id must reference a group in the destination bucket.",
+            )
+
     body: dict = {
         "title": src.get("title", ""),
         "status": src.get("status", "needsAction"),
     }
     if src.get("notes") is not None:
         body["notes"] = src["notes"]
-    if src.get("due") is not None:
-        body["due"] = src["due"]
+    if due_date is _UNSET:
+        if src.get("due") is not None:
+            body["due"] = src["due"]
+    elif due_date is not None:
+        body["due"] = f"{due_date}T00:00:00.000Z"
+    # else (explicit None): omit `due` → the copy lands in NO_DATE.
 
     # Insert first — nothing is deleted yet, so a failure leaves no partial state.
     try:
@@ -131,7 +162,7 @@ async def move(
 
     # Migrate the overlay row to the new key, then drop the old one.
     row = overlay_svc.upsert_overlay(
-        session, target_list_id, new_id, rank=rank, group_id=None
+        session, target_list_id, new_id, rank=rank, group_id=group_id
     )
     old = session.get(TaskOverlay, (tasklist_id, task_id))
     if old is not None:
@@ -142,7 +173,7 @@ async def move(
         "target_list_id": target_list_id,
         "new_task_id": new_id,
         "rank": row.rank,
-        "group_id": None,
+        "group_id": row.group_id,
     }
 
 

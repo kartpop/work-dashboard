@@ -17,7 +17,14 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { useEffect, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 
 import {
@@ -52,6 +59,41 @@ function dueToDateInput(due: string | null): string {
   if (!due) return "";
   const ist = new Date(new Date(due).getTime() + 5.5 * 3600 * 1000);
   return ist.toISOString().slice(0, 10);
+}
+
+/** "YYYY-MM-DD" (IST) for now + `offsetDays`. Mirrors the backend/hook bucketing. */
+function istDayKey(offsetDays: number): string {
+  const ms = Date.now() + 5.5 * 3600 * 1000 + offsetDays * 86_400_000;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * The bucket header text. Since the columns are grouped by date, the individual
+ * rows drop their dates (see `.task-column--compact-dates`) — so the Today /
+ * Tomorrow headers carry the concrete date + weekday instead (e.g.
+ * "Tomorrow — Wednesday, 08/07/2026"). Other buckets keep the server label.
+ */
+function bucketHeading(bucket: Bucket): string {
+  if (bucket.key === "NO_DATE" || bucket.key === "OVERDUE") return bucket.label;
+  const prefix =
+    bucket.key === istDayKey(0)
+      ? "Today"
+      : bucket.key === istDayKey(1)
+        ? "Tomorrow"
+        : null;
+  if (!prefix) return bucket.label;
+  const d = new Date(`${bucket.key}T00:00:00Z`);
+  const weekday = d.toLocaleDateString(undefined, {
+    weekday: "long",
+    timeZone: "UTC",
+  });
+  const dmy = d.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+  return `${prefix} — ${weekday}, ${dmy}`;
 }
 
 // ── Rank helpers ──────────────────────────────────────────────────────────────
@@ -273,7 +315,7 @@ function SortableTask({ task, compact, actions }: SortableTaskProps) {
         ) : (
           <span
             className="task-title"
-            title="Click to edit"
+            title={task.title}
             onClick={() => {
               setTitleInput(task.title);
               setEditing(true);
@@ -511,8 +553,12 @@ function BucketSection({
   const [newGroupName, setNewGroupName] = useState("");
 
   // Droppable for the whole bucket so empty/open-area drops resolve to a bucket.
+  // The id is list-scoped (goal 6: one shared DndContext spans the pinned pair,
+  // so `bucket:{key}` alone would collide across the two lists' same-named
+  // buckets). `data` carries the resolved list + bucket for the drag handler.
   const { setNodeRef: setDroppableRef } = useDroppable({
-    id: `bucket:${bucket.key}`,
+    id: `bucket:${list.id}:${bucket.key}`,
+    data: { listId: list.id, bucketKey: bucket.key },
   });
 
   const ids = flatItemIds(bucket.items);
@@ -527,7 +573,7 @@ function BucketSection({
 
   return (
     <div className="date-group">
-      <span className="date-group-label">{bucket.label}</span>
+      <span className="date-group-label">{bucketHeading(bucket)}</span>
       <SortableContext items={ids} strategy={verticalListSortingStrategy}>
         <ul ref={setDroppableRef} className="bucket-droppable">
           {bucket.items.map((item) =>
@@ -586,96 +632,39 @@ function BucketSection({
   );
 }
 
-// ── Task list section ─────────────────────────────────────────────────────────
-// ONE DndContext wraps ALL buckets of a single list, so a drag can leave its
-// bucket. handleDragEnd resolves source/dest buckets across the whole list.
+// ── Task list column (presentational, no DndContext) ──────────────────────────
+// Renders one list's header + add-task + buckets. The enclosing DndListGroup
+// owns the shared DndContext + drag handler, so a column never wraps its own
+// context (goal 6: the pinned pair shares ONE context to enable cross-list drag).
 
-interface TaskListSectionProps {
-  list: TaskList;
-  otherLists: ListRef[];
-  onReorderTask: (
-    tasklistId: string,
-    taskId: string,
-    bucketKey: string,
-    groupId: number | null,
-    fromIndex: number,
-    toIndex: number,
-    newRank: number,
-  ) => void;
-  onMoveTask: (
-    tasklistId: string,
-    taskId: string,
-    bucketKey: string,
-    destGroupId: number | null,
-    destIndex: number,
-    newRank: number,
-  ) => void;
-  onReorderGroup: (
-    tasklistId: string,
-    groupId: number,
-    bucketKey: string,
-    fromIndex: number,
-    toIndex: number,
-    newRank: number,
-  ) => void;
-  onRescheduleTask: (
-    listId: string,
-    taskId: string,
-    fromBucketKey: string,
-    toBucketKey: string,
-    dueDate: string | null,
-    destGroupId: number | null,
-    destIndex: number,
-    newRank: number,
-  ) => void;
-  onRenameGroup: BucketSectionProps["onRenameGroup"];
-  onDeleteGroup: BucketSectionProps["onDeleteGroup"];
-  onCreateGroup: BucketSectionProps["onCreateGroup"];
-  onMoveToList: (listId: string, taskId: string, targetListId: string) => void;
-  onCompleteTask: (listId: string, taskId: string) => void;
-  onEditTitle: (listId: string, taskId: string, title: string) => void;
-  onEditNotes: (listId: string, taskId: string, notes: string) => void;
-  onSetDueDate: (listId: string, taskId: string, date: string | null) => void;
-  onDeleteTask: (listId: string, taskId: string) => void;
-  onCreateTask: (listId: string, title: string) => void;
-  onRenameList: (listId: string, title: string) => void;
-}
+type TasksHook = ReturnType<typeof useTasksPanel>;
 
-function TaskListSection({
+function TaskListColumn({
   list,
-  otherLists,
-  onReorderTask,
-  onMoveTask,
-  onReorderGroup,
-  onRescheduleTask,
-  onRenameGroup,
-  onDeleteGroup,
-  onCreateGroup,
-  onMoveToList,
-  onCompleteTask,
-  onEditTitle,
-  onEditNotes,
-  onSetDueDate,
-  onDeleteTask,
-  onCreateTask,
-  onRenameList,
-}: TaskListSectionProps) {
-  const sensors = useSensors(
-    useSensor(PointerSensor),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
-  );
+  allLists,
+  tasks,
+  compactDates,
+}: {
+  list: TaskList;
+  allLists: ListRef[];
+  tasks: TasksHook;
+  // Pinned columns (My Tasks / Follow-up) hide the per-row date — the bucket is
+  // already the date — keeping only the calendar-picker icon (see CSS).
+  compactDates?: boolean;
+}) {
+  const otherLists = allLists.filter((l) => l.id !== list.id);
 
   const actions: TaskActions = {
     otherLists,
     onMoveToList: (taskId, targetListId) =>
-      onMoveToList(list.id, taskId, targetListId),
-    onComplete: (taskId) => onCompleteTask(list.id, taskId),
-    onEditTitle: (taskId, title) => onEditTitle(list.id, taskId, title),
-    onEditNotes: (taskId, notes) => onEditNotes(list.id, taskId, notes),
-    onSetDueDate: (taskId, date) => onSetDueDate(list.id, taskId, date),
-    onDelete: (taskId) => onDeleteTask(list.id, taskId),
+      tasks.moveTaskToList(list.id, taskId, targetListId),
+    onComplete: (taskId) => tasks.completeTask(list.id, taskId),
+    onEditTitle: (taskId, title) =>
+      tasks.editTaskField(list.id, taskId, { title }),
+    onEditNotes: (taskId, notes) =>
+      tasks.editTaskField(list.id, taskId, { notes }),
+    onSetDueDate: (taskId, date) => tasks.setDueDate(list.id, taskId, date),
+    onDelete: (taskId) => tasks.deleteTask(list.id, taskId),
   };
 
   // Inline rename of the list header + the per-list "+ add task" affordance.
@@ -688,7 +677,7 @@ function TaskListSection({
     setRenaming(false);
     const trimmed = titleInput.trim();
     if (trimmed && trimmed !== list.title) {
-      onRenameList(list.id, trimmed); // same-value fires no PATCH
+      tasks.renameList(list.id, trimmed); // same-value fires no PATCH
     } else {
       setTitleInput(list.title);
     }
@@ -697,45 +686,201 @@ function TaskListSection({
   function submitNewTask() {
     const title = newTitle.trim();
     if (!title) return;
-    onCreateTask(list.id, title);
+    void tasks.createTask(list.id, title);
     setNewTitle("");
     setAdding(false);
   }
 
-  // Keep a ref to the latest buckets for use inside handleDragEnd (which is a
-  // stable-ish closure invoked after render). Update the ref in an effect so we
-  // never write to a ref during render.
-  const bucketsRef = useRef(list.buckets);
+  return (
+    <section
+      className={`panel task-column${compactDates ? " task-column--compact-dates" : ""}`}
+    >
+      <div className="panel-head">
+        {renaming ? (
+          <input
+            className="list-title-input"
+            value={titleInput}
+            autoFocus
+            onChange={(e) => setTitleInput(e.target.value)}
+            onBlur={commitListRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitListRename();
+              if (e.key === "Escape") {
+                setRenaming(false);
+                setTitleInput(list.title);
+              }
+            }}
+          />
+        ) : (
+          <h2
+            className="list-title"
+            title="Click to rename list"
+            onClick={() => {
+              setTitleInput(list.title);
+              setRenaming(true);
+            }}
+          >
+            {list.title}
+          </h2>
+        )}
+        <button
+          className="panel-refresh"
+          aria-label="refresh tasks"
+          title="Refresh"
+          onClick={tasks.refresh}
+        >
+          ⟳
+        </button>
+      </div>
+      {adding ? (
+        <div className="add-task-form">
+          <input
+            className="add-task-input"
+            placeholder="New task"
+            value={newTitle}
+            autoFocus
+            onChange={(e) => setNewTitle(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submitNewTask();
+              if (e.key === "Escape") {
+                setAdding(false);
+                setNewTitle("");
+              }
+            }}
+          />
+          <button className="add-task-confirm" onClick={submitNewTask}>
+            Add
+          </button>
+          <button
+            className="add-task-cancel"
+            onClick={() => {
+              setAdding(false);
+              setNewTitle("");
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button className="add-task-btn" onClick={() => setAdding(true)}>
+          + add task
+        </button>
+      )}
+      {list.buckets.map((bucket) => (
+        <BucketSection
+          key={bucket.key}
+          bucket={bucket}
+          list={list}
+          actions={actions}
+          onRenameGroup={tasks.renameGroup}
+          onDeleteGroup={tasks.deleteGroup}
+          onCreateGroup={(listId, bucketKey, name) =>
+            void tasks.createGroup(listId, bucketKey, name)
+          }
+        />
+      ))}
+    </section>
+  );
+}
+
+// ── DnD list group (shared DndContext over one OR two lists) ───────────────────
+// g4 used one DndContext per list; g6 lets a single context span the pinned pair
+// so a task can be dragged BETWEEN lists. The handler resolves source/dest list +
+// bucket across all lists under the context, then dispatches:
+//   • same list, same bucket  → overlay reorder / move-into-group (g3, unchanged)
+//   • same list, other bucket → reschedule (g4, unchanged)
+//   • different list          → cross-list move (g6, may also reschedule + group)
+// A single list under the context (the "Other tasks" lists) never hits the
+// cross-list branch, so their behavior is identical to g4.
+
+function findListAndBucket(
+  lists: TaskList[],
+  id: string,
+): { list: TaskList; bucket: Bucket } | null {
+  for (const list of lists) {
+    const bucket = findBucketForId(list.buckets, id);
+    if (bucket) return { list, bucket };
+  }
+  return null;
+}
+
+function findTaskInBucket(bucket: Bucket, taskId: string): Task | null {
+  for (const it of bucket.items) {
+    if (it.type === "task" && it.id === taskId) return it;
+    if (it.type === "group") {
+      const f = it.items.find((t) => t.id === taskId);
+      if (f) return f;
+    }
+  }
+  return null;
+}
+
+function DndListGroup({
+  lists,
+  tasks,
+  children,
+}: {
+  // The lists under this context, used by handleDragEnd to resolve src/dest.
+  // Rendering the columns is the CALLER's job (passed as children) so a resize
+  // handle can be interleaved between the two pinned columns as a grid sibling.
+  lists: TaskList[];
+  tasks: TasksHook;
+  children: ReactNode;
+}) {
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+
+  // Keep a ref to the latest lists for handleDragEnd (a closure invoked after
+  // render). Update in an effect so we never write to a ref during render.
+  const listsRef = useRef(lists);
   useEffect(() => {
-    bucketsRef.current = list.buckets;
-  }, [list.buckets]);
+    listsRef.current = lists;
+  }, [lists]);
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
 
-    const buckets = bucketsRef.current;
+    const lists = listsRef.current;
     const activeId = String(active.id);
     const overId = String(over.id);
 
-    // Resolve source bucket (which bucket holds activeId).
-    const srcBucket = findBucketForId(buckets, activeId);
-    if (!srcBucket) return;
+    // Resolve source list + bucket (which holds activeId).
+    const src = findListAndBucket(lists, activeId);
+    if (!src) return;
+    const srcList = src.list;
+    const srcBucket = src.bucket;
 
-    // Resolve destination bucket. overId may be a task id, a `group-{id}`, a
-    // task inside a group, or a `bucket:{key}` droppable.
-    let destBucket: Bucket | null;
-    if (overId.startsWith("bucket:")) {
-      const key = overId.slice("bucket:".length);
-      destBucket = buckets.find((b) => b.key === key) ?? null;
+    // Resolve destination list + bucket. overId is a task id, a `group-{id}`, a
+    // task inside a group, or a `bucket:{listId}:{key}` droppable (its resolved
+    // list/bucket ride `over.data.current`).
+    let destList: TaskList;
+    let destBucket: Bucket;
+    const overData = over.data?.current as
+      | { listId?: string; bucketKey?: string }
+      | undefined;
+    if (overId.startsWith("bucket:") && overData?.listId != null) {
+      const dl = lists.find((l) => l.id === overData.listId);
+      const db = dl?.buckets.find((b) => b.key === overData.bucketKey);
+      if (!dl || !db) return;
+      destList = dl;
+      destBucket = db;
     } else {
-      destBucket = findBucketForId(buckets, overId);
+      const dest = findListAndBucket(lists, overId);
+      if (!dest) return;
+      destList = dest.list;
+      destBucket = dest.bucket;
     }
-    if (!destBucket) return;
 
-    // ── Group reorder (groups never span buckets) ─────────────────────────────
+    const crossList = destList.id !== srcList.id;
+
+    // ── Group reorder (groups never span buckets OR lists) ────────────────────
     if (activeId.startsWith("group-")) {
-      // Only allow reorder within the SAME bucket.
+      if (crossList) return;
       if (destBucket.key !== srcBucket.key) return;
       const items = srcBucket.items;
       const groupId = parseInt(activeId.slice(6), 10);
@@ -763,8 +908,8 @@ function TaskListSection({
       const [moved] = reordered.splice(fromIndex, 1);
       reordered.splice(toIndex, 0, moved);
       const newRank = computeMidpointRank(reordered, toIndex);
-      onReorderGroup(
-        list.id,
+      tasks.reorderGroup(
+        srcList.id,
         groupId,
         srcBucket.key,
         fromIndex,
@@ -812,57 +957,79 @@ function TaskListSection({
       }
     }
 
-    // ── Cross-bucket drag = RESCHEDULE ────────────────────────────────────────
-    if (destBucket.key !== srcBucket.key) {
-      // Overdue is a render-only rollup, not a real date — never a drop target
-      // for a reschedule (past dates are reachable via the date-picker instead).
-      if (destBucket.key === "OVERDUE") return;
-      const dueDate = destBucket.key === "NO_DATE" ? null : destBucket.key;
-      const destGroupId =
-        destContainer.type === "group" ? destContainer.groupId : null;
+    const destGroupId =
+      destContainer.type === "group" ? destContainer.groupId : null;
 
-      // Compute destIndex + newRank against the DEST container, with the task
-      // hypothetically inserted at the drop position.
-      const srcItems = srcBucket.items;
-      let movedTask: Task | null = null;
-      for (const it of srcItems) {
-        if (it.type === "task" && it.id === activeId) {
-          movedTask = it;
-          break;
-        }
-        if (it.type === "group") {
-          const f = it.items.find((t) => t.id === activeId);
-          if (f) {
-            movedTask = f;
-            break;
-          }
-        }
-      }
-      if (!movedTask) return;
-
-      let destIndex: number;
-      let newRank: number;
+    // Compute destIndex + newRank against the DEST container, with the dragged
+    // task hypothetically inserted at the drop position (shared by the cross-list
+    // and reschedule branches).
+    function destPlacement(movedTask: Task): {
+      destIndex: number;
+      newRank: number;
+    } {
       if (destGroupId === null) {
-        // Insert among the dest bucket's standalone-level items.
         const toIdx = Math.min(destIndexInContainer, destItems.length);
         const clone = [...destItems];
         clone.splice(toIdx, 0, { ...movedTask, rank: null } as Task);
-        newRank = computeMidpointRank(clone, toIdx);
-        destIndex = toIdx;
-      } else {
-        const destGrp = destItems.find(
-          (it): it is Group => it.type === "group" && it.id === destGroupId,
-        );
-        if (!destGrp) return;
-        const toIdx = Math.min(destIndexInContainer, destGrp.items.length);
-        const clone = [...destGrp.items];
-        clone.splice(toIdx, 0, { ...movedTask, rank: null } as Task);
-        newRank = computeGroupTaskRank(clone, toIdx);
-        destIndex = toIdx;
+        return { destIndex: toIdx, newRank: computeMidpointRank(clone, toIdx) };
       }
+      const destGrp = destItems.find(
+        (it): it is Group => it.type === "group" && it.id === destGroupId,
+      )!;
+      const toIdx = Math.min(destIndexInContainer, destGrp.items.length);
+      const clone = [...destGrp.items];
+      clone.splice(toIdx, 0, { ...movedTask, rank: null } as Task);
+      return { destIndex: toIdx, newRank: computeGroupTaskRank(clone, toIdx) };
+    }
 
-      onRescheduleTask(
-        list.id,
+    // ── Cross-list move (goal 6) ──────────────────────────────────────────────
+    if (crossList) {
+      // Overdue is a render-only rollup, not a real date — can't drag INTO it
+      // (past dates go through the picker). Dragging a task that IS overdue out
+      // to a real bucket is fine; same-bucket (Overdue→Overdue) preserves due.
+      if (destBucket.key === "OVERDUE" && srcBucket.key !== "OVERDUE") return;
+      const movedTask = findTaskInBucket(srcBucket, activeId);
+      if (!movedTask) return;
+      if (
+        destGroupId !== null &&
+        !destItems.some((it) => it.type === "group" && it.id === destGroupId)
+      )
+        return;
+
+      // Same bucket key → preserve source due (undefined); else set/clear it.
+      let dueDate: string | null | undefined;
+      if (destBucket.key === srcBucket.key) dueDate = undefined;
+      else if (destBucket.key === "NO_DATE") dueDate = null;
+      else dueDate = destBucket.key;
+
+      const { destIndex, newRank } = destPlacement(movedTask);
+      tasks.moveTaskCrossList(
+        srcList.id,
+        activeId,
+        destList.id,
+        destBucket.key,
+        dueDate,
+        destGroupId,
+        destIndex,
+        newRank,
+      );
+      return;
+    }
+
+    // ── Same list, cross-bucket drag = RESCHEDULE ─────────────────────────────
+    if (destBucket.key !== srcBucket.key) {
+      if (destBucket.key === "OVERDUE") return;
+      const dueDate = destBucket.key === "NO_DATE" ? null : destBucket.key;
+      const movedTask = findTaskInBucket(srcBucket, activeId);
+      if (!movedTask) return;
+      if (
+        destGroupId !== null &&
+        !destItems.some((it) => it.type === "group" && it.id === destGroupId)
+      )
+        return;
+      const { destIndex, newRank } = destPlacement(movedTask);
+      tasks.rescheduleTask(
+        srcList.id,
         activeId,
         srcBucket.key,
         destBucket.key,
@@ -874,7 +1041,7 @@ function TaskListSection({
       return;
     }
 
-    // ── Same bucket: behave exactly as goal 3 (overlay PATCH only) ─────────────
+    // ── Same list, same bucket: behave exactly as goal 3 (overlay PATCH only) ──
     const items = srcBucket.items;
     const srcContainer = findContainer(activeId, items);
     if (!srcContainer) return;
@@ -897,8 +1064,8 @@ function TaskListSection({
         const [moved] = reordered.splice(fromIdx, 1);
         reordered.splice(toIdx, 0, moved);
         const newRank = computeMidpointRank(reordered, toIdx);
-        onReorderTask(
-          list.id,
+        tasks.reorderTask(
+          srcList.id,
           activeId,
           srcBucket.key,
           null,
@@ -919,8 +1086,8 @@ function TaskListSection({
         const [moved] = reordered.splice(fromIdx, 1);
         reordered.splice(toIdx, 0, moved);
         const newRank = computeGroupTaskRank(reordered, toIdx);
-        onReorderTask(
-          list.id,
+        tasks.reorderTask(
+          srcList.id,
           activeId,
           srcBucket.key,
           groupId,
@@ -951,36 +1118,33 @@ function TaskListSection({
         const reordered = [...bucketLevelItems];
         reordered.splice(toIdx, 0, { ...taskBeingMoved, rank: null } as Task);
         const newRank = computeMidpointRank(reordered, toIdx);
-        onMoveTask(list.id, activeId, srcBucket.key, null, toIdx, newRank);
+        tasks.moveTask(
+          srcList.id,
+          activeId,
+          srcBucket.key,
+          null,
+          toIdx,
+          newRank,
+        );
       } else {
         // task moving into a group (from standalone or different group)
-        const destGroupId = (
+        const moveDestGroupId = (
           destContainer as { type: "group"; groupId: number }
         ).groupId;
         const destGrp = items.find(
-          (it): it is Group => it.type === "group" && it.id === destGroupId,
+          (it): it is Group => it.type === "group" && it.id === moveDestGroupId,
         )!;
         const toIdx = Math.min(destIndexInContainer, destGrp.items.length);
         const tasksClone = [...destGrp.items];
-        let movedTask: Task | undefined;
-        for (const it of items) {
-          if (it.type === "task" && it.id === activeId) {
-            movedTask = it;
-            break;
-          }
-          if (it.type === "group") {
-            movedTask = it.items.find((t) => t.id === activeId);
-            if (movedTask) break;
-          }
-        }
+        const movedTask = findTaskInBucket(srcBucket, activeId);
         if (!movedTask) return;
         tasksClone.splice(toIdx, 0, { ...movedTask, rank: null } as Task);
         const newRank = computeGroupTaskRank(tasksClone, toIdx);
-        onMoveTask(
-          list.id,
+        tasks.moveTask(
+          srcList.id,
           activeId,
           srcBucket.key,
-          destGroupId,
+          moveDestGroupId,
           toIdx,
           newRank,
         );
@@ -989,122 +1153,222 @@ function TaskListSection({
   }
 
   return (
-    <div className="task-list-section">
-      <div className="list-header">
-        {renaming ? (
-          <input
-            className="list-title-input"
-            value={titleInput}
-            autoFocus
-            onChange={(e) => setTitleInput(e.target.value)}
-            onBlur={commitListRename}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commitListRename();
-              if (e.key === "Escape") {
-                setRenaming(false);
-                setTitleInput(list.title);
-              }
-            }}
-          />
-        ) : (
-          <h3
-            className="list-title"
-            title="Click to rename list"
-            onClick={() => {
-              setTitleInput(list.title);
-              setRenaming(true);
-            }}
-          >
-            {list.title}
-          </h3>
-        )}
-      </div>
-      {adding ? (
-        <div className="add-task-form">
-          <input
-            className="add-task-input"
-            placeholder="New task"
-            value={newTitle}
-            autoFocus
-            onChange={(e) => setNewTitle(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submitNewTask();
-              if (e.key === "Escape") {
-                setAdding(false);
-                setNewTitle("");
-              }
-            }}
-          />
-          <button className="add-task-confirm" onClick={submitNewTask}>
-            Add
-          </button>
-          <button
-            className="add-task-cancel"
-            onClick={() => {
-              setAdding(false);
-              setNewTitle("");
-            }}
-          >
-            Cancel
-          </button>
-        </div>
-      ) : (
-        <button className="add-task-btn" onClick={() => setAdding(true)}>
-          + add task
-        </button>
-      )}
-      <DndContext
-        sensors={sensors}
-        collisionDetection={collisionDetection}
-        onDragEnd={handleDragEnd}
-      >
-        {list.buckets.map((bucket) => (
-          <BucketSection
-            key={bucket.key}
-            bucket={bucket}
-            list={list}
-            actions={actions}
-            onRenameGroup={onRenameGroup}
-            onDeleteGroup={onDeleteGroup}
-            onCreateGroup={onCreateGroup}
-          />
-        ))}
-      </DndContext>
+    <DndContext
+      sensors={sensors}
+      collisionDetection={collisionDetection}
+      onDragEnd={handleDragEnd}
+    >
+      {children}
+    </DndContext>
+  );
+}
+
+// ── Layout: pinned pair, other tasks, toasts (goal 6) ─────────────────────────
+
+// The two lists that fill the full-width top row, matched by title against the
+// live Google lists at load. Static in code (no ui_prefs / visibility chooser
+// yet — deferred). A title missing from Google renders an empty-column hint.
+export const PINNED_LIST_TITLES = ["My Tasks", "Follow-up"];
+
+function allListRefs(taskLists: TaskList[]): ListRef[] {
+  return taskLists.map((l) => ({ id: l.id, title: l.title }));
+}
+
+// ── Resizable top row (goal 6a) ───────────────────────────────────────────────
+// The three columns (My Tasks | Follow-up | Scratchpad) live in ONE grid with a
+// draggable handle between each adjacent pair, so each column can be squished or
+// widened independently. Column widths are `fr` fractions (default 30/30/40) held
+// in ephemeral state — no persistence yet (ui_prefs is deferred to goal 9). Below
+// a breakpoint the grid stacks and the handles hide (see CSS).
+
+const DEFAULT_WIDTHS = [0.3, 0.3, 0.4];
+const HANDLE_PX = 14;
+const MIN_FRAC = 0.14;
+
+function ResizeHandle({
+  onPointerDown,
+}: {
+  onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      className="resize-handle"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="resize columns"
+      onPointerDown={onPointerDown}
+    >
+      <span className="resize-handle-bar" />
     </div>
   );
 }
 
-// ── Panel ─────────────────────────────────────────────────────────────────────
-
-export function TasksPanel({
+/**
+ * The full-width top row: the pinned pair (My Tasks | Follow-up) under ONE shared
+ * DndContext so a task can be dragged between them, plus the scratchpad as the
+ * third column — all in a single resizable grid. A missing pinned title degrades
+ * to an empty-column hint without affecting the other columns. The scratchpad is
+ * passed in (composed by DashboardPage) so this panel imports no sibling panel.
+ */
+export function PinnedTasksRow({
   tasks,
+  scratchpad,
 }: {
-  tasks: ReturnType<typeof useTasksPanel>;
+  tasks: TasksHook;
+  scratchpad: ReactNode;
 }) {
-  const {
-    taskLists,
-    isLoading,
-    error,
-    writeError,
-    actionToast,
-    reorderTask,
-    moveTask,
-    reorderGroup,
-    createGroup,
-    renameGroup,
-    deleteGroup,
-    rescheduleTask,
-    moveTaskToList,
-    dismissWriteError,
-    createTask,
-    editTaskField,
-    completeTask,
-    deleteTask,
-    setDueDate,
-    renameList,
-    refresh,
-    undoActionToast,
-  } = tasks;
+  const { taskLists, isLoading, error } = tasks;
+  const allLists = allListRefs(taskLists);
+  const [widths, setWidths] = useState(DEFAULT_WIDTHS);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const resolved = PINNED_LIST_TITLES.map((title) => ({
+    title,
+    list: taskLists.find((l) => l.title === title) ?? null,
+  }));
+  const foundLists = resolved
+    .map((r) => r.list)
+    .filter((l): l is TaskList => l !== null);
+
+  // Drag a handle: convert pointer dx to a fraction of the flexible width and
+  // shift it between the two columns the handle sits between (clamped to MIN).
+  function beginResize(boundary: number, e: ReactPointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    const container = containerRef.current;
+    if (!container) return;
+    const avail = container.clientWidth - 2 * HANDLE_PX;
+    if (avail <= 0) return;
+    const startX = e.clientX;
+    const start = widths;
+    const li = boundary;
+    const ri = boundary + 1;
+    function onMove(ev: PointerEvent) {
+      const d = (ev.clientX - startX) / avail;
+      let left = start[li] + d;
+      let right = start[ri] - d;
+      if (left < MIN_FRAC) {
+        right -= MIN_FRAC - left;
+        left = MIN_FRAC;
+      }
+      if (right < MIN_FRAC) {
+        left -= MIN_FRAC - right;
+        right = MIN_FRAC;
+      }
+      const next = [...start];
+      next[li] = left;
+      next[ri] = right;
+      setWidths(next);
+    }
+    function onUp() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    document.body.style.userSelect = "none";
+  }
+
+  const gridStyle = {
+    "--w0": `${widths[0]}fr`,
+    "--w1": `${widths[1]}fr`,
+    "--w2": `${widths[2]}fr`,
+    "--handle": `${HANDLE_PX}px`,
+  } as CSSProperties;
+
+  // The two pinned slots, in title order: a real column (found) or a hint.
+  let slot0: ReactNode;
+  let slot1: ReactNode;
+  if (isLoading || error) {
+    slot0 = (
+      <section className="panel task-column">
+        <p className={`panel-status${error ? " panel-error" : ""}`}>
+          {error ?? "Loading…"}
+        </p>
+      </section>
+    );
+    slot1 = <section className="panel task-column" aria-hidden />;
+  } else {
+    const [s0, s1] = resolved.map(({ title, list }) =>
+      list ? (
+        <TaskListColumn
+          key={title}
+          list={list}
+          allLists={allLists}
+          tasks={tasks}
+          compactDates
+        />
+      ) : (
+        <section key={title} className="panel task-column pinned-missing">
+          <div className="panel-head">
+            <h2 className="list-title">{title}</h2>
+          </div>
+          <p className="panel-status panel-error">
+            list &lsquo;{title}&rsquo; not found — rename a Google list to
+            match, or edit PINNED_LIST_TITLES.
+          </p>
+        </section>
+      ),
+    );
+    slot0 = s0;
+    slot1 = s1;
+  }
+
+  return (
+    <div className="top-row-resizable" ref={containerRef} style={gridStyle}>
+      <DndListGroup lists={foundLists} tasks={tasks}>
+        {slot0}
+        <ResizeHandle onPointerDown={(e) => beginResize(0, e)} />
+        {slot1}
+      </DndListGroup>
+      <ResizeHandle onPointerDown={(e) => beginResize(1, e)} />
+      {scratchpad}
+    </div>
+  );
+}
+
+/**
+ * All non-pinned lists, collapsed by default (ephemeral state, no persistence).
+ * Each list keeps its own DndContext (single-list, no cross-list drag) so its
+ * behavior is exactly the g4 per-list one. Fully functional when expanded.
+ */
+export function OtherTasksSection({ tasks }: { tasks: TasksHook }) {
+  const { taskLists, isLoading, error } = tasks;
+  const [open, setOpen] = useState(false);
+  const allLists = allListRefs(taskLists);
+  const others = taskLists.filter((l) => !PINNED_LIST_TITLES.includes(l.title));
+
+  if (isLoading || error || others.length === 0) return null;
+
+  return (
+    <section className="panel other-tasks">
+      <button
+        className="other-tasks-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        {open ? "▾" : "▸"} Other tasks ({others.length})
+      </button>
+      {open && (
+        <div className="other-lists">
+          {others.map((list) => (
+            <DndListGroup key={list.id} lists={[list]} tasks={tasks}>
+              <TaskListColumn list={list} allLists={allLists} tasks={tasks} />
+            </DndListGroup>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * The shared write toasts (action-undo + error). Rendered once for the whole
+ * tasks surface — both `.toast` variants are `position: fixed`, so a single
+ * mount covers every column. State comes from the one lifted `useTasksPanel`.
+ */
+export function TasksToasts({ tasks }: { tasks: TasksHook }) {
+  const { writeError, actionToast, dismissWriteError, undoActionToast } = tasks;
 
   // Auto-dismiss the error toast after ~4s. (The action toast self-expires in
   // the hook after ~5s, committing any deferred write.)
@@ -1114,56 +1378,8 @@ export function TasksPanel({
     return () => window.clearTimeout(id);
   }, [writeError, dismissWriteError]);
 
-  const allLists: ListRef[] = taskLists.map((l) => ({
-    id: l.id,
-    title: l.title,
-  }));
-
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h2>Tasks</h2>
-        <button
-          className="panel-refresh"
-          aria-label="refresh tasks"
-          title="Refresh"
-          onClick={refresh}
-        >
-          ⟳
-        </button>
-      </div>
-      {isLoading && <p className="panel-status">Loading…</p>}
-      {error && <p className="panel-status panel-error">{error}</p>}
-      {!isLoading &&
-        !error &&
-        taskLists.map((list) => (
-          <TaskListSection
-            key={list.id}
-            list={list}
-            otherLists={allLists.filter((l) => l.id !== list.id)}
-            onReorderTask={reorderTask}
-            onMoveTask={moveTask}
-            onReorderGroup={reorderGroup}
-            onRescheduleTask={rescheduleTask}
-            onRenameGroup={renameGroup}
-            onDeleteGroup={deleteGroup}
-            onCreateGroup={(listId, bucketKey, name) =>
-              void createGroup(listId, bucketKey, name)
-            }
-            onMoveToList={moveTaskToList}
-            onCompleteTask={completeTask}
-            onEditTitle={(listId, taskId, title) =>
-              editTaskField(listId, taskId, { title })
-            }
-            onEditNotes={(listId, taskId, notes) =>
-              editTaskField(listId, taskId, { notes })
-            }
-            onSetDueDate={setDueDate}
-            onDeleteTask={deleteTask}
-            onCreateTask={(listId, title) => void createTask(listId, title)}
-            onRenameList={renameList}
-          />
-        ))}
+    <>
       {actionToast && (
         <div className="toast toast--action" role="status">
           <span>{actionToast.message}</span>
@@ -1184,6 +1400,6 @@ export function TasksPanel({
           </button>
         </div>
       )}
-    </section>
+    </>
   );
 }

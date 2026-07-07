@@ -40,6 +40,17 @@ patch body.
   current list is rejected (400) — the client blocks it too.
 - **Insert before delete (move).** Cross-list move = insert a copy into the target list, then —
   only after the insert returns a new task id — delete the original. Never delete first.
+- **`move` may reschedule on the insert leg (goal 6).** `move` takes an optional `due_date` and
+  `group_id` so a cross-list drag that also changes the date bucket / lands in a group is **one
+  orchestrated write**, not two chained calls that can half-fail. Semantics:
+  - `due_date is _UNSET` (omitted by the router when the request has no `due_date` key) → the copy
+    **preserves the source task's due**; an explicit value sets it on the insert body (`None` →
+    omit `due` → `NO_DATE`). Rollback rules are unchanged — the reschedule rides the same insert.
+  - `group_id` (when not None) must reference a group in the **destination** `(target_list, bucket)`
+    where `bucket = due_date or NO_DATE` if provided, else the source task's current bucket — else
+    **422**, raised *before* any Google write. It is set on the migrated overlay row (the g4 move
+    always ungrouped; now it honours the drop target). Menu-move callers pass neither → identical
+    to g4 behavior.
 - **`delete_task` has exactly TWO sanctioned callers (g4a):** (1) the **move** orchestration,
   only after a confirmed successful insert; (2) the **user `delete` endpoint**
   (`writes.service.delete`). No other code path may call it. In move, if the delete fails *after*
@@ -68,7 +79,8 @@ patch body.
   touches only the dragged task's overlay row (`group_id` → destination group or NULL); source
   group siblings are never modified.
 - **Overlay-row migration on move.** After a successful move, migrate the overlay row to the new
-  `(tasklist_id, new_task_id)` key (rank = the request's `rank` or default, `group_id = NULL`)
+  `(tasklist_id, new_task_id)` key (rank = the request's `rank` or default, `group_id` = the
+  request's `group_id` — `NULL` unless a goal-6 cross-list drag dropped into a destination group)
   and delete the old row.
 
 ## Scope / auth
