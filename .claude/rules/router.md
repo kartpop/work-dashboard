@@ -17,9 +17,13 @@ under `backend/app/router/`.
   exactly **`{create_task, reschedule, append_note}`** — the AST test pins it.
   - **`writes_svc.create_task`** (task content) + **`writes_svc.reschedule`** (the g4a date path to
     set the new task's due date — non-destructive metadata).
-  - **`writes_svc.append_note`** (goal 7): a high-confidence `note` is appended **verbatim,
-    insert-only** to the top of the configured notes Doc under an H3 timestamp. **Never a Docs
-    delete or overwrite** — `append_note` only inserts.
+  - **`writes_svc.append_note`** (goal 7): a high-confidence `note` is appended **insert-only** to
+    the top of the configured notes Doc under an H3 timestamp. **Never a Docs delete or
+    overwrite** — `append_note` only inserts. **Goal 7c amendment:** the Doc entry now carries
+    **one LLM-authored line** — the classifier's `summary` one-liner (bold, between the timestamp
+    and the body). The *raw text stays verbatim*; the summary is the only generated line. The write
+    set and insert-only contract are **unchanged** (still `append_note`, no new writer); a
+    missing/empty summary degrades to the goal-7 shape.
   Routing must **NEVER** reach `delete_task`, the complete/uncomplete status write, `update_content`,
   or any `files.delete` / `files.update` content rewrite. The router is **not** a sanctioned
   `delete_task` caller (writes.md's two callers stand; the router is not a third).
@@ -44,10 +48,15 @@ under `backend/app/router/`.
   persists `routing_state`, builds review items. A Google-write failure leaves the entry `UNROUTED`
   (re-routable) and raises `ApiError` — never swallowed, never half-written.
 - `scheduler.py` — in-process periodic `route_unrouted` (no Celery). `route-now` calls the same fn.
+  **Goal 7c:** capture routes **inline** in `POST /scratch` (`route_entry` runs in the request; the
+  response carries the routed state). The scheduler is demoted to a **retry backstop** for entries
+  inline routing left `UNROUTED` — default interval stretched to ~15 min. Capture is persisted before
+  routing, so a routing failure never loses it (2xx, entry `UNROUTED`).
 - `evals/` — the labelled set + the scored runner; `score()` is a pure function (unit-tested without
   the API). The gate: clear-case destination accuracy ≥ 0.90 **and** zero task-class false positives
   **and** zero ambiguous cases auto-written. Notes are graded on **destination only** — the body is
-  verbatim (deterministic) and the timestamp/top-insertion are unit-tested, not eval-graded.
+  verbatim (deterministic) and the timestamp/top-insertion are unit-tested, not eval-graded. The
+  goal-7c `summary` one-liner is **not eval-graded** (cosmetic, spot-checked — not a write decision).
 
 ## Model tiering
 

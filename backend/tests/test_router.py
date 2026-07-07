@@ -157,8 +157,8 @@ def notes(monkeypatch):
     async def _get_parents(file_id):
         return rec["parents"].get(file_id, [])
 
-    async def _insert_note(doc_id, heading, body):
-        rec["insert"].append((doc_id, heading, body))
+    async def _insert_note(doc_id, heading, body, summary=None):
+        rec["insert"].append((doc_id, heading, body, summary))
 
     monkeypatch.setattr("app.google.docs.get_parents", _get_parents)
     monkeypatch.setattr("app.google.docs.insert_note", _insert_note)
@@ -218,7 +218,7 @@ def test_high_conf_note_writes_verbatim_to_doc(
     state = run(router_svc.route_entry(session, _entry(session, body)))
     assert state == KEPT_NOTE
     assert len(notes["insert"]) == 1
-    doc_id, heading, written = notes["insert"][0]
+    doc_id, heading, written, _summary = notes["insert"][0]
     assert doc_id == "DOC1"
     assert written == body  # verbatim — bullets/indentation preserved
     assert heading.endswith("IST")
@@ -431,29 +431,64 @@ def test_confirm_event_acknowledges_no_write(session, google, fake_classify):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-def test_capture_appends_unrouted(client):
+def test_capture_persists_and_lists(client, google, fake_classify):
+    """Capture persists + is listed. It also routes inline (goal 7c) — an event
+    proposal lands in review, but the raw entry is stored append-only regardless."""
+    _set(fake_classify, "event", 0.95, title="lunch")
     r = client.post("/scratch", json={"text": "  a thought  "})
     assert r.status_code == 201
     body = r.json()
-    assert body["text"] == "a thought" and body["routing_state"] == UNROUTED
+    assert body["text"] == "a thought"
     assert client.get("/scratch").json()["entries"][0]["id"] == body["id"]
+
+
+def test_capture_routes_inline(client, google, fake_classify):
+    """Goal 7c: the POST response carries the routed state — a high-confidence task
+    is created in Google without waiting for any scheduler tick."""
+    _set(fake_classify, "task", 0.95, title="buy milk")
+    r = client.post("/scratch", json={"text": "buy milk"})
+    assert r.status_code == 201
+    assert r.json()["routing_state"] == ROUTED_TASK
+    assert google.names().count("insert_task") == 1
+
+
+def test_capture_inline_failure_leaves_unrouted(
+    client, google, fake_classify, monkeypatch
+):
+    """A Google failure during inline routing still returns 2xx (capture never
+    lost) and leaves the entry UNROUTED for the scheduler backstop to retry."""
+
+    async def _boom(list_id, body):
+        raise RuntimeError("google down")
+
+    monkeypatch.setattr("app.google.tasks.insert_task", _boom)
+    _set(fake_classify, "task", 0.95, title="boom")
+    r = client.post("/scratch", json={"text": "boom"})
+    assert r.status_code == 201
+    assert r.json()["routing_state"] == UNROUTED
 
 
 def test_capture_empty_400(client):
     assert client.post("/scratch", json={"text": "   "}).status_code == 400
 
 
-def test_route_now_endpoint(client, google, fake_classify):
+def test_route_now_endpoint_is_backstop_noop(client, google, fake_classify, notes):
+    """Capture routes inline now, so route-now (the backstop) finds nothing to do."""
     _set(fake_classify, "note", 0.95, note_text="x")
-    client.post("/scratch", json={"text": "a note"})
+    client.post("/scratch", json={"text": "a note"})  # routes inline → kept_note
     r = client.post("/scratch/route-now")
-    assert r.status_code == 200 and r.json()["tally"]["kept_note"] == 1
+    assert r.status_code == 200
+    assert r.json()["tally"] == {
+        "routed_task": 0,
+        "kept_note": 0,
+        "in_review": 0,
+        "failed": 0,
+    }
 
 
 def test_review_confirm_endpoint(client, google, fake_classify):
     _set(fake_classify, "event", 0.95, title="lunch")
-    client.post("/scratch", json={"text": "lunch with Sam thursday"})
-    client.post("/scratch/route-now")
+    client.post("/scratch", json={"text": "lunch with Sam thursday"})  # → review inline
     items = client.get("/review").json()["items"]
     assert len(items) == 1
     r = client.post(
@@ -574,6 +609,85 @@ def test_insert_note_puts_h3_timestamp_at_top(monkeypatch):
     assert "borderBottom" in delim["fields"]
 
 
+def _capture_batchupdate(monkeypatch):
+    """Patch the Docs service to capture the batchUpdate requests; returns the box."""
+    from app.google import docs as docs_mod
+
+    captured: dict = {}
+
+    class FakeDocs:
+        def documents(self):
+            return self
+
+        def batchUpdate(self, documentId, body):
+            captured["documentId"] = documentId
+            captured["requests"] = body["requests"]
+            return self
+
+        def execute(self):
+            return {}
+
+    monkeypatch.setattr(docs_mod, "_docs_service", lambda: FakeDocs())
+    return captured
+
+
+def test_insert_note_with_summary_bold_one_liner(monkeypatch):
+    """Goal 7c entry shape: H3 timestamp → bold one-liner → verbatim body →
+    delimiter. The one-liner is a bold (updateTextStyle) NORMAL_TEXT paragraph."""
+    from app.google import docs as docs_mod
+
+    captured = _capture_batchupdate(monkeypatch)
+    run(
+        docs_mod.insert_note(
+            "DOC", "6-July-2026, 8:41 PM IST", "- a\n- b", "milk + eggs"
+        )
+    )
+    reqs = captured["requests"]
+    text = reqs[0]["insertText"]["text"]
+    # timestamp, then the one-liner on its own line, then the verbatim body.
+    assert text.startswith("6-July-2026, 8:41 PM IST\nmilk + eggs\n")
+    assert text.endswith("- a\n- b\n\n")
+    # exactly one bold text-style request — the one-liner.
+    bold = [
+        r
+        for r in reqs
+        if "updateTextStyle" in r and r["updateTextStyle"]["textStyle"].get("bold")
+    ]
+    assert len(bold) == 1
+    # the bold range starts right after the heading paragraph.
+    heading_end = 1 + len("6-July-2026, 8:41 PM IST") + 1
+    assert bold[0]["updateTextStyle"]["range"]["startIndex"] == heading_end
+    # delimiter still present.
+    assert "borderBottom" in reqs[-1]["updateParagraphStyle"]["paragraphStyle"]
+
+
+def test_insert_note_empty_summary_degrades_to_g7_shape(monkeypatch):
+    """A missing/blank summary → no bold line, the goal-7 heading→body→delimiter
+    shape, never blocking the write."""
+    from app.google import docs as docs_mod
+
+    captured = _capture_batchupdate(monkeypatch)
+    run(docs_mod.insert_note("DOC", "6-July-2026, 8:41 PM IST", "- a", "   "))
+    reqs = captured["requests"]
+    assert reqs[0]["insertText"]["text"] == "6-July-2026, 8:41 PM IST\n- a\n\n"
+    assert not any("updateTextStyle" in r for r in reqs)
+
+
+def test_auto_route_note_passes_summary_through(
+    session, google, fake_classify, notes, monkeypatch
+):
+    """A high-confidence note carries the classifier's summary into the Doc write."""
+    monkeypatch.setenv("NOTES_DOC_ID", "DOC1")
+    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
+    notes["parents"]["DOC1"] = ["FOLDER1"]
+    _set(fake_classify, "note", 0.95, note_text="x", summary="entropy video")
+    state = run(router_svc.route_entry(session, _entry(session, "raw verbatim text")))
+    assert state == KEPT_NOTE
+    doc_id, heading, body, summary = notes["insert"][0]
+    assert body == "raw verbatim text"  # raw stays verbatim
+    assert summary == "entropy video"  # the LLM one-liner rides alongside
+
+
 def test_confirm_as_note_review_writes_to_doc(
     session, google, fake_classify, notes, monkeypatch
 ):
@@ -589,3 +703,51 @@ def test_confirm_as_note_review_writes_to_doc(
     assert res["entry_state"] == KEPT_NOTE
     assert len(notes["insert"]) == 1
     assert notes["insert"][0][2] == "- a stray thought"  # verbatim entry text
+
+
+def test_confirm_as_note_uses_edited_body_and_one_liner(
+    session, google, fake_classify, notes, monkeypatch
+):
+    """Goal 7c: review edits win — a user-edited note body + one-liner are what
+    land in the Doc, not the raw captured text."""
+    monkeypatch.setenv("NOTES_DOC_ID", "DOC1")
+    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
+    notes["parents"]["DOC1"] = ["FOLDER1"]
+    _set(fake_classify, "unknown", 0.1)  # lands in review
+    run(router_svc.route_entry(session, _entry(session, "raw capture text")))
+    item = session.exec(select(ReviewItem)).first()
+    res = run(
+        router_svc.confirm_review(
+            session,
+            item.id,
+            destination="note",
+            fields=RouterFields(note_text="cleaned body", summary="a headline"),
+        )
+    )
+    assert res["entry_state"] == KEPT_NOTE
+    _doc, _heading, body, summary = notes["insert"][0]
+    assert body == "cleaned body"  # the edit, not the raw capture
+    assert summary == "a headline"
+
+
+def test_review_note_endpoint_overrides(
+    client, google, fake_classify, notes, monkeypatch
+):
+    """The /confirm endpoint threads note_text + summary overrides through to the
+    Doc write (task | note only in the UI; the endpoint honors both)."""
+    monkeypatch.setenv("NOTES_DOC_ID", "DOC1")
+    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
+    notes["parents"]["DOC1"] = ["FOLDER1"]
+    _set(fake_classify, "event", 0.95, title="lunch")  # → review inline
+    client.post("/scratch", json={"text": "some thought"})
+    item = client.get("/review").json()["items"][0]
+    r = client.post(
+        f"/review/{item['id']}/confirm",
+        json={
+            "destination": "note",
+            "fields": {"note_text": "edited note", "summary": "one-liner"},
+        },
+    )
+    assert r.status_code == 200 and r.json()["entry_state"] == KEPT_NOTE
+    assert notes["insert"][0][2] == "edited note"
+    assert notes["insert"][0][3] == "one-liner"

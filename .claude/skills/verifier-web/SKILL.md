@@ -217,6 +217,21 @@ Key selectors:
   `.strip-today` — the jump-back button (present only when viewing a non-today day).
 - `.strip-toast` — the transient "Meet link copied" / "No Meet link for this event" confirmation.
 
+### Goal-7c selectors / checks (instant routing, editable review, create-row date)
+- `.add-task-top-row` — the create row: `.add-task-input` (title) + `.task-date` (due picker) +
+  `.add-task-confirm` / `.add-task-cancel`; `.add-task-notes-input` is the notes textarea below.
+  Picking a date + Add creates the task **in that date bucket** (one optimistic result).
+- `.review-fields` — the editable review item. `select` type choice offers **exactly `task | note`**
+  (`event` dropped from the UI). Switching type swaps the fields: **task** → `.review-title` +
+  `.review-notes` + `.task-date` + `.review-hint`; **note** → `.review-summary` (bold one-liner) +
+  `.review-note-text`. Confirmed edits are what land.
+- **Instant-routing check (the goal-7c headline):** capture a high-confidence task
+  (e.g. "buy milk tomorrow") via `.capture-input` + Shift+Enter, wait past the ~5s undo hold, and
+  assert the RECENT entry badge (`.scratch-badge.state-routed_task`) shows **→ Task** and the task
+  appears in the panel — **without** clicking `.route-now-btn`. `POST /scratch`'s own response
+  carries the routed state; no `route-now` call is needed. (A failure leaves `.state-unrouted`; the
+  scheduler backstop — now ~15 min — retries.)
+
 **Goal-4 DnD note:** there is now ONE `<DndContext>` per task list (it spans the list's buckets), so a
 task can be dragged *between* date buckets = reschedule (one `reschedule` POST + optimistic re-bucket).
 A within-bucket drag still fires only an overlay PATCH (no Google write). Write-path verification

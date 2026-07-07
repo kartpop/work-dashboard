@@ -15,6 +15,7 @@ export interface ReviewFields {
   due_date?: string | null;
   notes?: string | null;
   note_text?: string | null;
+  summary?: string | null;
   event_datetime?: string | null;
   attendees?: string | null;
 }
@@ -87,13 +88,21 @@ export function useScratchPanel() {
     return () => window.clearInterval(id);
   }, [load]);
 
-  // Append a capture. Optimistic prepend, then reconcile from the server response.
-  const capture = useCallback(async (text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    const created = await apiPost<ScratchEntry>("/scratch", { text: trimmed });
-    setEntries((prev) => [created, ...prev]);
-  }, []);
+  // Append a capture. The POST now routes inline (goal 7c), so the response
+  // carries the routed state — prepend it as-is (RECENT shows it filed). Returns
+  // the created entry so the caller can refresh the Tasks panel on a routed task.
+  const capture = useCallback(
+    async (text: string): Promise<ScratchEntry | null> => {
+      const trimmed = text.trim();
+      if (!trimmed) return null;
+      const created = await apiPost<ScratchEntry>("/scratch", {
+        text: trimmed,
+      });
+      setEntries((prev) => [created, ...prev]);
+      return created;
+    },
+    [],
+  );
 
   // Manual "route now" — same code path as the scheduled job. Reload after.
   // Returns whether any entry was routed to a Google task, so the caller can

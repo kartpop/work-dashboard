@@ -37,7 +37,9 @@ IST using TODAY below; else null. "tomorrow" = TODAY + 1 day; "day after" / "day
 tomorrow" = TODAY + 2 days; also handle named weekdays like "friday" and "next monday"), \
 notes (any trailing detail; else null).
 - "note": a thought to remember, not an action ("remember the Vsauce video on entropy", \
-"idea: a CLI for X"). Extract: note_text (the cleaned thought).
+"idea: a CLI for X"). Extract: note_text (the cleaned thought), and summary (a single \
+short phrase — a few words — capturing the note's essence, like a headline; NOT a rewrite \
+of the note, NOT a full sentence).
 - "event": something with other people at a specific time ("lunch with Tejas thursday 1pm", \
 "standup moved to 10"). Extract: title, event_datetime (free text), attendees (free text).
 - "unknown": genuinely ambiguous or unclassifiable input.

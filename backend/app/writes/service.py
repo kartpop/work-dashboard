@@ -196,20 +196,25 @@ async def create_task(
     tasklist_id: str,
     title: str,
     rank: float | None,
+    notes: str | None = None,
+    due_date: str | None = None,
 ) -> dict:
-    """Create a task in a list's NO_DATE bucket (no due) and seed its overlay row.
+    """Create a task and seed its overlay row.
 
     Returns the merged task shape so the client can insert-from-response (no
-    refetch). New tasks always land undated — dates are set via the picker
-    (reschedule).
+    refetch). Optional notes and due_date ("YYYY-MM-DD") are set on insert.
     """
     if not title.strip():
         raise ApiError(400, "empty_title", "Task title must not be empty.")
 
+    body: dict = {"title": title, "status": "needsAction"}
+    if notes:
+        body["notes"] = notes
+    if due_date:
+        body["due"] = f"{due_date}T00:00:00.000Z"
+
     try:
-        new = await tasks_client.insert_task(
-            tasklist_id, {"title": title, "status": "needsAction"}
-        )
+        new = await tasks_client.insert_task(tasklist_id, body)
     except Exception as exc:
         raise ApiError(
             502, "google_insert_failed", "Could not create the task."
@@ -377,17 +382,26 @@ async def _walk_to_folder(file_id: str, folder_id: str, max_depth: int = 10) -> 
     return False
 
 
-async def append_note(doc_id: str, folder_id: str | None, body_text: str) -> dict:
+async def append_note(
+    doc_id: str,
+    folder_id: str | None,
+    body_text: str,
+    summary: str | None = None,
+) -> dict:
     """Append a verbatim note to the top of the configured Doc under an H3 timestamp.
 
     Router-only write. Insert-only — never deletes or overwrites the Doc. The
     ancestry gate runs first (fail-closed); a Docs error is surfaced as an ApiError
     so the entry stays re-routable (route-once marks routed only on success).
+
+    `summary` (goal 7c) is the one LLM-authored line — a bold one-liner inserted
+    between the timestamp and the verbatim `body_text`. The raw text stays verbatim;
+    an empty/missing summary degrades to the goal-7 shape.
     """
     await _assert_in_notes_folder(doc_id, folder_id)
     heading = format_note_heading(datetime.now(_IST))
     try:
-        await docs_client.insert_note(doc_id, heading, body_text)
+        await docs_client.insert_note(doc_id, heading, body_text, summary)
     except ApiError:
         raise
     except Exception as exc:

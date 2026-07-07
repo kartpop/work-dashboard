@@ -103,8 +103,10 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
   const pendingRef = useRef<string | null>(null);
   const timerRef = useRef<number | null>(null);
   const captureFnRef = useRef(scratch.capture);
+  const onRoutedRef = useRef(onRouted);
   useEffect(() => {
     captureFnRef.current = scratch.capture;
+    onRoutedRef.current = onRouted;
   });
 
   // Restore held text into the editor: prepend above anything the user typed
@@ -125,8 +127,11 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
     setShowUndo(false);
     if (held === null) return;
     try {
-      await captureFnRef.current(held);
+      // Capture now routes inline (goal 7c) — if it filed a Google task, refresh
+      // the (separately-owned) Tasks panel so it appears without a scheduler tick.
+      const created = await captureFnRef.current(held);
       setCaptureError(null);
+      if (created?.routing_state === "routed_task") onRoutedRef.current?.();
     } catch (err) {
       setCaptureError((err as Error).message);
       restoreHeld(held);
@@ -236,14 +241,6 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
     <section className="panel capture-panel" ref={panelRef}>
       <div className="panel-head">
         <h2>Scratchpad</h2>
-        <button
-          className="panel-refresh"
-          onClick={routeNow}
-          disabled={scratch.busy}
-          title="Route all unrouted entries now"
-        >
-          {scratch.busy ? "Routing…" : "Route now"}
-        </button>
       </div>
 
       <form
@@ -280,6 +277,8 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
         items={scratch.reviewItems}
         onConfirm={confirmItem}
         onDismiss={scratch.dismissItem}
+        onRouteNow={routeNow}
+        busy={scratch.busy}
       />
 
       <div

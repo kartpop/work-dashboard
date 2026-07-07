@@ -73,12 +73,19 @@ patch body.
   create-only contract lives in `.claude/rules/router.md` and is asserted by a router write-path test
   (the router's write dependency set is exactly `{create_task, reschedule, append_note}` from g7).
 - **`append_note` is a router-only caller (goal 7).** `writes.service.append_note(doc_id, folder_id,
-  body_text)` is the notes writer: it appends a captured note **verbatim, insert-only** to the top of
-  the configured Doc under an H3 timestamp (`format_note_heading`). Its **only** caller is
+  body_text, summary=None)` is the notes writer: it appends a captured note **insert-only** to the top
+  of the configured Doc under an H3 timestamp (`format_note_heading`). Its **only** caller is
   `app.router.service` (the high-confidence `note` path + confirm-as-note in review). It is
   **insert-only forever** — never a Docs delete, never a content overwrite, never a status/content
   task write. The `delete_task` two-caller rule and the `create_task` two-caller rule both stand
   unchanged; `append_note` adds a *new* surface, it doesn't widen the task-write callers.
+  **Goal 7c:** the Doc entry gains **one LLM-authored line** — the classifier's `summary` one-liner,
+  rendered **bold** between the timestamp and the **still-verbatim** raw text (`insert_note`'s
+  `summary_text` arg). The raw body stays verbatim; the summary is the *only* generated line; an
+  empty/missing summary degrades to the goal-7 shape. Write set + insert-only unchanged (still one
+  `documents.batchUpdate`, no new method surface — the AST test is unaffected). Confirm-as-note in
+  review may pass an edited body + summary (review edits win); the auto-route path passes
+  `fields.summary`.
 - **Folder-ancestry gate + fail-closed (goal 7).** Before any `batchUpdate`, `append_note` verifies
   the target doc's `parents` chain reaches `NOTES_FOLDER_ID` (`_assert_in_notes_folder`, cached per
   doc id). **Fail-closed:** a missing folder id, an unreachable doc, or any error verifying ancestry

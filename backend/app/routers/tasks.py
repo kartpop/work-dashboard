@@ -128,6 +128,8 @@ async def move_task(
 class TaskCreate(BaseModel):
     title: str
     rank: Optional[float] = None  # top-of-bucket rank computed by the client
+    notes: Optional[str] = None
+    due_date: Optional[str] = None  # "YYYY-MM-DD"
 
 
 class TaskContentUpdate(BaseModel):
@@ -149,7 +151,12 @@ async def create_task(
     session: Session = Depends(get_session),
 ):
     return await writes_svc.create_task(
-        session, tasklist_id=tasklist_id, title=body.title, rank=body.rank
+        session,
+        tasklist_id=tasklist_id,
+        title=body.title,
+        rank=body.rank,
+        notes=body.notes,
+        due_date=body.due_date,
     )
 
 

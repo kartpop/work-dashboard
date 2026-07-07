@@ -59,17 +59,26 @@ def _notes_doc_config() -> tuple[str | None, str | None]:
     return os.environ.get("NOTES_DOC_ID"), os.environ.get("NOTES_FOLDER_ID")
 
 
-async def _dispose_note(session: Session, entry: ScratchEntry) -> str:
-    """Dispose a high-confidence `note`: write it VERBATIM to the top of the Doc if
-    `NOTES_DOC_ID` is set, else keep it local (logged warning). Returns KEPT_NOTE.
+async def _dispose_note(
+    session: Session,
+    entry: ScratchEntry,
+    text: str | None = None,
+    summary: str | None = None,
+) -> str:
+    """Dispose a `note`: write it VERBATIM to the top of the Doc if `NOTES_DOC_ID`
+    is set, else keep it local (logged warning). Returns KEPT_NOTE.
+
+    `text` overrides the raw body (a review edit); default = the entry text verbatim.
+    `summary` (goal 7c) is the LLM one-liner rendered bold above the raw text.
 
     A Docs failure raises (entry left re-routable, rollback) so route-once only marks
     the entry routed after a successful append — same contract as the task path.
     """
+    body_text = text if text is not None else entry.text
     doc_id, folder_id = _notes_doc_config()
     if doc_id:
         try:
-            await writes_svc.append_note(doc_id, folder_id, entry.text)
+            await writes_svc.append_note(doc_id, folder_id, body_text, summary=summary)
         except ApiError:
             session.rollback()
             raise
@@ -171,7 +180,9 @@ async def route_entry(session: Session, entry: ScratchEntry) -> str:
             raise
         entry.routing_state = ROUTED_TASK
     elif dest == "note" and above:
-        entry.routing_state = await _dispose_note(session, entry)
+        entry.routing_state = await _dispose_note(
+            session, entry, summary=fields.summary
+        )
     else:
         if dest in ("task", "note"):
             reason = f"low confidence ({conf:.2f}) for {dest}"
@@ -237,7 +248,15 @@ async def confirm_review(
             raise
         entry.routing_state = ROUTED_TASK
     elif dest == "note":
-        entry.routing_state = await _dispose_note(session, entry)
+        # Review edits win: a user-edited note body / one-liner is what lands
+        # (goal 7c). An empty note_text falls back to the verbatim entry text.
+        edited = (eff_fields.note_text or "").strip()
+        entry.routing_state = await _dispose_note(
+            session,
+            entry,
+            text=edited or None,
+            summary=eff_fields.summary,
+        )
     else:
         # event / unknown: acknowledged, no write (calendar read-only v1).
         entry.routing_state = RESOLVED

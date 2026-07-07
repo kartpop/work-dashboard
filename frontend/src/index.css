@@ -736,9 +736,15 @@ h1, h2, h3 {
 
 .add-task-form {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 6px;
   margin-bottom: 6px;
+}
+
+.add-task-top-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .add-task-input {
@@ -776,6 +782,25 @@ h1, h2, h3 {
 
 .add-task-cancel:hover {
   color: var(--done);
+}
+
+.add-task-notes-input {
+  width: 100%;
+  min-height: 62px;
+  resize: vertical;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-h);
+  outline: none;
+  box-sizing: border-box;
+}
+
+.add-task-notes-input:focus {
+  border-color: var(--done);
 }
 
 /* ── Scratchpad + review queue (goal 5) ──────────────────────── */
@@ -856,6 +881,37 @@ h1, h2, h3 {
   color: var(--done);
 }
 
+.review-queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.review-queue-head h3 {
+  margin: 0;
+}
+
+.route-now-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.route-now-btn:hover {
+  border-color: var(--done);
+}
+
+.route-now-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .review-item {
   background: rgba(180, 83, 9, 0.06);
   border: 1px solid rgba(180, 83, 9, 0.3) !important;
@@ -901,11 +957,29 @@ h1, h2, h3 {
 }
 
 .review-fields input,
-.review-fields select {
+.review-fields select,
+.review-fields textarea {
   font: inherit;
   padding: 3px 6px;
   border: 1px solid var(--border);
   border-radius: 4px;
+}
+
+/* Title / one-liner / note body get their own full-width row so edits are roomy. */
+.review-title,
+.review-summary,
+.review-notes,
+.review-note-text {
+  flex: 1 1 100%;
+}
+
+.review-notes,
+.review-note-text {
+  resize: vertical;
+}
+
+.review-summary {
+  font-weight: 600;
 }
 
 .review-fields label {

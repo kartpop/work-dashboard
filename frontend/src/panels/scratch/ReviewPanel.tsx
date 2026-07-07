@@ -1,7 +1,10 @@
 import { useState } from "react";
 import type { ReviewFields, ReviewItem } from "./useScratchPanel";
 
-const DESTINATIONS = ["task", "note", "event", "unknown"];
+// The user resolves a review item as a task or a note only (goal 7c). `event`
+// stays a valid classifier output — it just lands here for the user to pick one
+// of these two (calendar is read-only).
+const DESTINATIONS = ["task", "note"] as const;
 
 interface Props {
   items: ReviewItem[];
@@ -10,13 +13,33 @@ interface Props {
     override?: { destination?: string; fields?: ReviewFields },
   ) => Promise<boolean>;
   onDismiss: (id: number) => Promise<void>;
+  onRouteNow?: () => void;
+  busy?: boolean;
 }
 
-export function ReviewQueue({ items, onConfirm, onDismiss }: Props) {
+export function ReviewQueue({
+  items,
+  onConfirm,
+  onDismiss,
+  onRouteNow,
+  busy,
+}: Props) {
   if (items.length === 0) return null;
   return (
     <>
-      <h3>Review queue</h3>
+      <div className="review-queue-head">
+        <h3>Review queue</h3>
+        {onRouteNow && (
+          <button
+            className="route-now-btn"
+            onClick={onRouteNow}
+            disabled={busy}
+            title="Route all unrouted entries now"
+          >
+            {busy ? "Routing…" : "Route now"}
+          </button>
+        )}
+      </div>
       <ul className="review-list">
         {items.map((item) => (
           <ReviewRow
@@ -40,25 +63,45 @@ function ReviewRow({
   onConfirm: Props["onConfirm"];
   onDismiss: Props["onDismiss"];
 }) {
-  const [destination, setDestination] = useState(item.destination);
+  // Type defaults to the classifier's proposal when it's already task/note; an
+  // event/unknown proposal defaults to `task` (the user picks the real one).
+  const initialDest =
+    item.destination === "note"
+      ? "note"
+      : ("task" as (typeof DESTINATIONS)[number]);
+  const [destination, setDestination] =
+    useState<(typeof DESTINATIONS)[number]>(initialDest);
   const [title, setTitle] = useState(item.fields.title ?? "");
+  const [notes, setNotes] = useState(item.fields.notes ?? "");
   const [dueDate, setDueDate] = useState(item.fields.due_date ?? "");
   const [listHint, setListHint] = useState(item.fields.list_hint ?? "");
+  // Note fields: the raw body (fall back to the captured text) + the one-liner.
+  const [noteText, setNoteText] = useState(
+    item.fields.note_text ?? item.entry_text ?? "",
+  );
+  const [summary, setSummary] = useState(item.fields.summary ?? "");
   const [pending, setPending] = useState(false);
 
   const confirm = () => {
     setPending(true);
-    // Send the (possibly edited) destination + fields. The backend fires a
-    // create_task only for a `task`; other destinations are acknowledged, no write.
-    onConfirm(item.id, {
-      destination,
-      fields: {
-        ...item.fields,
-        title: title || null,
-        due_date: dueDate || null,
-        list_hint: listHint || null,
-      },
-    }).catch(() => setPending(false));
+    // Send the (possibly edited) destination + fields. Deterministic code does the
+    // write with whatever the user confirmed: a `task` fires create_task (+date),
+    // a `note` appends the edited body + one-liner to the Doc.
+    const fields: ReviewFields =
+      destination === "note"
+        ? {
+            ...item.fields,
+            note_text: noteText || null,
+            summary: summary || null,
+          }
+        : {
+            ...item.fields,
+            title: title || null,
+            notes: notes || null,
+            due_date: dueDate || null,
+            list_hint: listHint || null,
+          };
+    onConfirm(item.id, { destination, fields }).catch(() => setPending(false));
   };
 
   return (
@@ -80,7 +123,9 @@ function ReviewRow({
           Type
           <select
             value={destination}
-            onChange={(e) => setDestination(e.target.value)}
+            onChange={(e) =>
+              setDestination(e.target.value as (typeof DESTINATIONS)[number])
+            }
           >
             {DESTINATIONS.map((d) => (
               <option key={d} value={d}>
@@ -89,13 +134,20 @@ function ReviewRow({
             ))}
           </select>
         </label>
-        {destination === "task" && (
+        {destination === "task" ? (
           <>
             <input
               className="review-title"
               value={title}
               placeholder="task title"
               onChange={(e) => setTitle(e.target.value)}
+            />
+            <textarea
+              className="review-notes"
+              value={notes}
+              placeholder="notes (optional)"
+              rows={2}
+              onChange={(e) => setNotes(e.target.value)}
             />
             <input
               type="date"
@@ -107,6 +159,22 @@ function ReviewRow({
               value={listHint}
               placeholder="list (optional)"
               onChange={(e) => setListHint(e.target.value)}
+            />
+          </>
+        ) : (
+          <>
+            <input
+              className="review-summary"
+              value={summary}
+              placeholder="one-liner (optional)"
+              onChange={(e) => setSummary(e.target.value)}
+            />
+            <textarea
+              className="review-note-text"
+              value={noteText}
+              placeholder="note text"
+              rows={3}
+              onChange={(e) => setNoteText(e.target.value)}
             />
           </>
         )}

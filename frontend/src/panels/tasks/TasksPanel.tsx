@@ -686,6 +686,8 @@ function TaskListColumn({
   const [titleInput, setTitleInput] = useState(list.title);
   const [adding, setAdding] = useState(false);
   const [newTitle, setNewTitle] = useState("");
+  const [newNotes, setNewNotes] = useState("");
+  const [newDueDate, setNewDueDate] = useState("");
 
   function commitListRename() {
     setRenaming(false);
@@ -697,12 +699,21 @@ function TaskListColumn({
     }
   }
 
+  function resetAddForm() {
+    setNewTitle("");
+    setNewNotes("");
+    setNewDueDate("");
+    setAdding(false);
+  }
+
   function submitNewTask() {
     const title = newTitle.trim();
     if (!title) return;
-    void tasks.createTask(list.id, title);
-    setNewTitle("");
-    setAdding(false);
+    void tasks.createTask(list.id, title, {
+      notes: newNotes.trim() || null,
+      dueDate: newDueDate || null,
+    });
+    resetAddForm();
   }
 
   return (
@@ -751,32 +762,41 @@ function TaskListColumn({
       <div className="task-column-body">
         {adding ? (
           <div className="add-task-form">
-            <input
-              className="add-task-input"
-              placeholder="New task"
-              value={newTitle}
-              autoFocus
-              onChange={(e) => setNewTitle(e.target.value)}
+            <div className="add-task-top-row">
+              <input
+                className="add-task-input"
+                placeholder="New task"
+                value={newTitle}
+                autoFocus
+                onChange={(e) => setNewTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submitNewTask();
+                  if (e.key === "Escape") resetAddForm();
+                }}
+              />
+              <input
+                type="date"
+                className="task-date"
+                value={newDueDate}
+                aria-label="due date"
+                onChange={(e) => setNewDueDate(e.target.value)}
+              />
+              <button className="add-task-confirm" onClick={submitNewTask}>
+                Add
+              </button>
+              <button className="add-task-cancel" onClick={resetAddForm}>
+                Cancel
+              </button>
+            </div>
+            <textarea
+              className="add-task-notes-input"
+              placeholder="Add notes"
+              value={newNotes}
+              onChange={(e) => setNewNotes(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") submitNewTask();
-                if (e.key === "Escape") {
-                  setAdding(false);
-                  setNewTitle("");
-                }
+                if (e.key === "Escape") resetAddForm();
               }}
             />
-            <button className="add-task-confirm" onClick={submitNewTask}>
-              Add
-            </button>
-            <button
-              className="add-task-cancel"
-              onClick={() => {
-                setAdding(false);
-                setNewTitle("");
-              }}
-            >
-              Cancel
-            </button>
           </div>
         ) : (
           <button className="add-task-btn" onClick={() => setAdding(true)}>

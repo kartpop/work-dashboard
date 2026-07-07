@@ -49,12 +49,19 @@ async def get_parents(file_id: str) -> list[str]:
 # ── Insert-only note write (Docs batchUpdate) ─────────────────────────────────
 
 
-def _insert_note(doc_id: str, heading_text: str, body_text: str) -> None:
-    """Insert a Heading-3 timestamp + verbatim body at the TOP of the doc body.
+def _insert_note(
+    doc_id: str, heading_text: str, body_text: str, summary_text: str | None = None
+) -> None:
+    """Insert a Heading-3 timestamp + optional one-liner + verbatim body at the TOP.
 
     Newest note always lands first. Index 1 is the start of the body; a single
     batchUpdate applies its requests sequentially, so the style ranges see the
     just-inserted text. Insert-only — nothing existing is deleted or overwritten.
+
+    Entry shape (goal 7c): H3 timestamp → the LLM one-liner (bold, the ONLY
+    LLM-authored line) → the verbatim raw text → the delimiter. `summary_text`
+    empty/None degrades to the goal-7 shape (heading → body → delimiter), never
+    blocking the write.
 
     A trailing empty paragraph is styled as a light-gray delimiter with spacing
     above/below (goal 7a) — the Docs API has no horizontal-rule request, so a
@@ -64,12 +71,12 @@ def _insert_note(doc_id: str, heading_text: str, body_text: str) -> None:
     """
     service = _docs_service()
 
-    # Block: "<heading>\n<body>\n\n" — heading paragraph, body paragraph, and a
-    # trailing EMPTY paragraph that carries the delimiter styling below.
-    block = f"{heading_text}\n{body_text}\n\n"
+    summary_text = (summary_text or "").strip()
+    # Block: "<heading>\n[<summary>\n]<body>\n\n" — heading, optional one-liner,
+    # body, and a trailing EMPTY paragraph carrying the delimiter styling below.
+    summary_block = f"{summary_text}\n" if summary_text else ""
+    block = f"{heading_text}\n{summary_block}{body_text}\n\n"
     heading_end = 1 + len(heading_text) + 1  # end index of the heading paragraph
-    body_end = heading_end + len(body_text) + 1  # end index of the body paragraph
-    delim_end = body_end + 1  # end index of the empty delimiter paragraph
 
     requests: list[dict] = [
         {"insertText": {"location": {"index": 1}, "text": block}},
@@ -81,11 +88,40 @@ def _insert_note(doc_id: str, heading_text: str, body_text: str) -> None:
             }
         },
     ]
+
+    body_start = heading_end
+    if summary_text:
+        summary_end = heading_end + len(summary_text) + 1
+        # The one-liner is a normal paragraph with BOLD text — visually distinct
+        # from the verbatim raw text below it (goal 7c).
+        requests.append(
+            {
+                "updateParagraphStyle": {
+                    "range": {"startIndex": heading_end, "endIndex": summary_end},
+                    "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                    "fields": "namedStyleType",
+                }
+            }
+        )
+        requests.append(
+            {
+                "updateTextStyle": {
+                    "range": {"startIndex": heading_end, "endIndex": summary_end - 1},
+                    "textStyle": {"bold": True},
+                    "fields": "bold",
+                }
+            }
+        )
+        body_start = summary_end
+
+    body_end = body_start + len(body_text) + 1  # end index of the body paragraph
+    delim_end = body_end + 1  # end index of the empty delimiter paragraph
+
     if body_text:
         requests.append(
             {
                 "updateParagraphStyle": {
-                    "range": {"startIndex": heading_end, "endIndex": body_end},
+                    "range": {"startIndex": body_start, "endIndex": body_end},
                     "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
                     "fields": "namedStyleType",
                 }
@@ -123,9 +159,15 @@ def _insert_note(doc_id: str, heading_text: str, body_text: str) -> None:
     ).execute()
 
 
-async def insert_note(doc_id: str, heading_text: str, body_text: str) -> None:
-    """Insert a timestamped note at the top of the configured Doc (insert-only)."""
-    await asyncio.to_thread(_insert_note, doc_id, heading_text, body_text)
+async def insert_note(
+    doc_id: str, heading_text: str, body_text: str, summary_text: str | None = None
+) -> None:
+    """Insert a timestamped note at the top of the configured Doc (insert-only).
+
+    Optional `summary_text` renders as a bold one-liner between the timestamp and
+    the verbatim body (goal 7c) — the only LLM-authored line in the entry.
+    """
+    await asyncio.to_thread(_insert_note, doc_id, heading_text, body_text, summary_text)
 
 
 # ── The ONE sanctioned file-create (bootstrap only) ───────────────────────────

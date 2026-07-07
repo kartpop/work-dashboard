@@ -4,6 +4,11 @@ A single asyncio task started from the FastAPI lifespan periodically routes any
 `UNROUTED` scratch entries — no Celery / broker (single-user local app). The
 manual `route-now` endpoint calls the same `route_unrouted` directly, so dev/eval
 never waits on the timer. Disable with `ROUTER_SCHEDULER_ENABLED=0`.
+
+Goal 7c: capture routes inline (`POST /scratch`), so this loop is demoted to a
+**retry backstop** — it only picks up entries that inline routing left UNROUTED
+(crash/downtime recovery, transient Google/Docs failures). Hence the ~15-min default
+interval; nothing user-facing waits on the timer anymore.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from app.router import service as router_svc
 _log = logging.getLogger("router.scheduler")
 
 _ENABLED = os.environ.get("ROUTER_SCHEDULER_ENABLED", "1") not in ("0", "false", "")
-_INTERVAL = float(os.environ.get("ROUTER_SCHEDULER_INTERVAL", "300"))
+_INTERVAL = float(os.environ.get("ROUTER_SCHEDULER_INTERVAL", "900"))
 
 _task: asyncio.Task | None = None
 

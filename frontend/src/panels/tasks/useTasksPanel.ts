@@ -238,36 +238,6 @@ function updateTaskFields(
   };
 }
 
-/** Insert a task at the top of a list's NO_DATE bucket (creating it if absent). */
-function insertAtTopOfNoDate(
-  state: TasksPanelState,
-  tasklistId: string,
-  task: Task,
-): TasksPanelState {
-  return {
-    ...state,
-    taskLists: state.taskLists.map((list) => {
-      if (list.id !== tasklistId) return list;
-      const idx = list.buckets.findIndex((b) => b.key === "NO_DATE");
-      if (idx === -1) {
-        return {
-          ...list,
-          buckets: [
-            ...list.buckets,
-            { label: "No date", key: "NO_DATE", items: [task] },
-          ],
-        };
-      }
-      return {
-        ...list,
-        buckets: list.buckets.map((b) =>
-          b.key === "NO_DATE" ? { ...b, items: [task, ...b.items] } : b,
-        ),
-      };
-    }),
-  };
-}
-
 /** Replace a standalone task (matched by id) in a list with a new task object. */
 function replaceTaskInList(
   state: TasksPanelState,
@@ -741,50 +711,62 @@ export function useTasksPanel() {
 
   // Create a task at the top of NO_DATE. Optimistic temp row → POST → reconcile
   // the server-assigned id (insert-from-response, g3 createGroup pattern).
-  const createTask = useCallback(async (listId: string, title: string) => {
-    const trimmed = title.trim();
-    if (!trimmed) return; // empty title rejected client-side
-    const tempId = `temp-${Date.now()}`;
-    let snapshot: TaskList[] | null = null;
-    let rank = 1000;
-    setState((prev) => {
-      snapshot = prev.taskLists;
-      const list = prev.taskLists.find((l) => l.id === listId);
-      const noDate = list?.buckets.find((b) => b.key === "NO_DATE");
-      const topRank =
-        noDate && noDate.items.length
-          ? Math.min(...noDate.items.map((it, i) => it.rank ?? (i + 1) * 1000))
-          : 2000;
-      rank = topRank - 1000;
-      const temp: Task = {
-        type: "task",
-        id: tempId,
-        title: trimmed,
-        status: "needsAction",
-        due: null,
-        notes: null,
-        parent: null,
-        rank,
-        group_id: null,
-      };
-      return insertAtTopOfNoDate(prev, listId, temp);
-    });
-    try {
-      const created = await apiPost<Task>(`/tasks/${listId}`, {
-        title: trimmed,
-        rank,
+  const createTask = useCallback(
+    async (
+      listId: string,
+      title: string,
+      opts?: { notes?: string | null; dueDate?: string | null },
+    ) => {
+      const trimmed = title.trim();
+      if (!trimmed) return;
+      const tempId = `temp-${Date.now()}`;
+      const dueRfc = opts?.dueDate ? `${opts.dueDate}T00:00:00.000Z` : null;
+      const notesVal = opts?.notes ?? null;
+      let snapshot: TaskList[] | null = null;
+      let rank = 1000;
+      setState((prev) => {
+        snapshot = prev.taskLists;
+        const list = prev.taskLists.find((l) => l.id === listId);
+        const targetKey = dueRfc ? bucketKeyForDue(dueRfc) : "NO_DATE";
+        const targetBucket = list?.buckets.find((b) => b.key === targetKey);
+        const topRank =
+          targetBucket && targetBucket.items.length
+            ? Math.min(
+                ...targetBucket.items.map((it, i) => it.rank ?? (i + 1) * 1000),
+              )
+            : 2000;
+        rank = topRank - 1000;
+        const temp: Task = {
+          type: "task",
+          id: tempId,
+          title: trimmed,
+          status: "needsAction",
+          due: dueRfc,
+          notes: notesVal,
+          parent: null,
+          rank,
+          group_id: null,
+        };
+        return insertMovedTask(prev, listId, temp);
       });
-      setState((s) =>
-        replaceTaskInList(s, listId, tempId, { ...created, type: "task" }),
-      );
-    } catch (err) {
-      setState((s) => ({
-        ...s,
-        taskLists: snapshot ?? s.taskLists,
-        writeError: `Create failed: ${(err as Error).message}`,
-      }));
-    }
-  }, []);
+      try {
+        const body: Record<string, unknown> = { title: trimmed, rank };
+        if (notesVal) body.notes = notesVal;
+        if (opts?.dueDate) body.due_date = opts.dueDate;
+        const created = await apiPost<Task>(`/tasks/${listId}`, body);
+        setState((s) =>
+          replaceTaskInList(s, listId, tempId, { ...created, type: "task" }),
+        );
+      } catch (err) {
+        setState((s) => ({
+          ...s,
+          taskLists: snapshot ?? s.taskLists,
+          writeError: `Create failed: ${(err as Error).message}`,
+        }));
+      }
+    },
+    [],
+  );
 
   // Inline edit of title or notes. The component guards same-value (so a no-op
   // fires no PATCH); the hook applies optimistically and reconciles on failure.

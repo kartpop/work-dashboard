@@ -7,6 +7,7 @@ runtime LLM (the classifier) is reached through that service, never here.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends
@@ -18,6 +19,8 @@ from app.errors import ApiError
 from app.router import service as router_svc
 from app.router.models import PENDING, ReviewItem, ScratchEntry
 from app.router.schema import RouterFields
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -38,13 +41,28 @@ class CaptureRequest(BaseModel):
 
 @router.post("/scratch", status_code=201)
 async def capture(body: CaptureRequest, session: Session = Depends(get_session)):
-    """Append a raw capture. Append-only: never edits or deletes prior entries."""
+    """Append a raw capture, then route it inline (goal 7c instant routing).
+
+    Capture is persisted FIRST (append-only; never edits or deletes prior entries),
+    so it can never be lost. Routing then runs synchronously in the same request and
+    the response carries the routed state — RECENT renders it filed immediately, no
+    scheduler tick. A classifier/Google failure leaves the entry UNROUTED and still
+    returns 2xx (capture succeeded); the scheduler backstop retries the filing.
+    """
     text = body.text.strip()
     if not text:
         raise ApiError(400, "empty_capture", "Capture text must not be empty.")
     entry = ScratchEntry(text=text)
     session.add(entry)
     session.commit()
+    session.refresh(entry)
+
+    try:
+        await router_svc.route_entry(session, entry)
+    except ApiError:
+        # A Google/Docs write failed — the entry is already persisted and left
+        # UNROUTED (re-routable). Capture is never lost; the backstop retries.
+        logger.warning("inline routing failed for entry %s; left unrouted", entry.id)
     session.refresh(entry)
     return _entry_out(entry)
 

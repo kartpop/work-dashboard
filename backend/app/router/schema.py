@@ -35,6 +35,13 @@ class RouterFields(BaseModel):
     note_text: Optional[str] = Field(
         default=None, description="Cleaned note body when destination is note."
     )
+    summary: Optional[str] = Field(
+        default=None,
+        description=(
+            "For a note: a single short phrase (a few words) capturing the note's "
+            "essence — a one-liner headline, NOT a rewrite of the note. Else null."
+        ),
+    )
     event_datetime: Optional[str] = Field(
         default=None,
         description="Event date/time as free text when destination is event.",
