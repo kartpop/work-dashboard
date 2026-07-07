@@ -44,9 +44,19 @@ h1, h2, h3 {
   padding: 24px;
 }
 
-.dashboard h1 {
+/* Header row: title left, calendar strip filling the remaining width (goal 7b). */
+.dashboard-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.dashboard-header h1 {
   font-size: 28px;
-  margin: 0 0 24px;
+  margin: 0;
+  flex-shrink: 0;
+  line-height: 1.1;
 }
 
 /* ── Goal 6 layout: resizable top row + collapsed Other tasks ──────────────── */
@@ -129,34 +139,6 @@ h1, h2, h3 {
   margin: 0;
   padding: 0;
   cursor: pointer;
-}
-
-/* Collapsed section holding every non-pinned list. */
-.other-tasks {
-  margin-bottom: 24px;
-}
-
-.other-tasks-toggle {
-  width: 100%;
-  background: none;
-  border: none;
-  color: var(--text-h);
-  font-size: 15px;
-  font-weight: 600;
-  text-align: left;
-  padding: 4px 0;
-  cursor: pointer;
-}
-
-.other-tasks-toggle:hover {
-  color: var(--text);
-}
-
-.other-lists {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 20px;
-  margin-top: 12px;
 }
 
 .panel {
@@ -976,7 +958,7 @@ h1, h2, h3 {
    and RECENT scrolls in the remainder with its own scrollbar. The split is controlled
    via --editor-ratio custom property (dragged via the resize handle). */
 .capture-panel {
-  --editor-ratio: 0.6;
+  --editor-ratio: 0.7;
 }
 
 .capture-panel .capture-form {
@@ -1125,4 +1107,278 @@ h1, h2, h3 {
 
 .group-tasks {
   padding-left: 0;
+}
+
+/* ── Goal 7b: calendar header strip ────────────────────────────────────────── */
+/* A compact day-strip (~80px) that fills the header whitespace right of the title:
+   a 9a–6p axis with hour ticks, proportional meeting blocks in ≤2 lanes, a red
+   now-marker, ±1h chevrons, and a day-navigation row. */
+.calendar-strip {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.strip-body {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.strip-chevron {
+  flex: 0 0 auto;
+  width: 22px;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.strip-chevron:hover:not(:disabled) {
+  background: var(--muted-bg);
+}
+
+.strip-chevron:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.strip-hint-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text);
+  display: inline-block;
+  vertical-align: middle;
+  margin: 0 1px;
+}
+
+/* The axis: relative box; blocks are absolutely positioned above the line, ticks
+   below. Fixed height keeps the header from growing. */
+.strip-axis {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 56px;
+}
+
+.strip-blocks {
+  position: absolute;
+  inset: 0 0 16px 0;
+}
+
+.strip-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 16px;
+  height: 1px;
+  background: var(--border);
+}
+
+.strip-tick {
+  position: absolute;
+  bottom: 0;
+  transform: translateX(-50%);
+  color: var(--done);
+}
+
+.strip-tick::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  width: 1px;
+  height: 3px;
+  background: var(--border);
+}
+
+.strip-tick-label {
+  font-size: 10px;
+}
+
+/* Meeting block: a soft, muted tint — the only strong color on the strip is the
+   red now-marker. */
+.strip-block {
+  position: absolute;
+  height: 18px;
+  box-sizing: border-box;
+  padding: 0 5px;
+  background: color-mix(in srgb, var(--text) 12%, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-h);
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.strip-block:hover {
+  background: color-mix(in srgb, var(--text) 20%, var(--bg));
+}
+
+.strip-block-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Hover tooltip with the full detail. */
+.strip-tooltip {
+  display: none;
+  position: absolute;
+  top: 20px;
+  left: 0;
+  z-index: 50;
+  width: max-content;
+  max-width: 260px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  white-space: normal;
+  cursor: default;
+}
+
+.strip-block:hover .strip-tooltip {
+  display: block;
+}
+
+.strip-tooltip .tt-title {
+  font-weight: 600;
+  color: var(--text-h);
+  margin-bottom: 2px;
+}
+
+.strip-tooltip .tt-time,
+.strip-tooltip .tt-loc,
+.strip-tooltip .tt-att {
+  color: var(--text);
+  margin-bottom: 2px;
+}
+
+.strip-tooltip .tt-open {
+  display: inline-block;
+  margin-top: 4px;
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.strip-tooltip .tt-open:hover {
+  text-decoration: underline;
+}
+
+/* The red now-marker — a thin vertical line with the time above it. */
+.strip-now {
+  position: absolute;
+  top: 0;
+  bottom: 16px;
+  width: 2px;
+  background: #e5484d;
+  transform: translateX(-1px);
+  z-index: 10;
+  pointer-events: none;
+}
+
+.strip-now-label {
+  position: absolute;
+  top: -14px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  font-weight: 600;
+  color: #e5484d;
+  white-space: nowrap;
+}
+
+.strip-status {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  font-size: 11px;
+}
+
+.strip-error {
+  color: var(--error);
+}
+
+/* Day-navigation row under the axis. */
+.strip-daynav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.strip-daypill {
+  background: none;
+  border: none;
+  color: var(--done);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.strip-daypill:hover {
+  color: var(--text);
+  background: var(--muted-bg);
+}
+
+.strip-viewed {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-h);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.strip-today {
+  background: var(--muted-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 1px 6px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.strip-today:hover {
+  color: var(--text-h);
+}
+
+/* Click-to-copy confirmation — unobtrusive, auto-dismissing. */
+.strip-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--text-h);
+  color: var(--bg);
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  z-index: 1000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+/* Below the g6a stacking breakpoint, drop the strip (the header returns to just
+   the title) to match the existing stacking behavior. */
+@media (max-width: 1080px) {
+  .calendar-strip {
+    display: none;
+  }
 }

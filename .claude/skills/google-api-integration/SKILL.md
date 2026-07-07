@@ -61,3 +61,20 @@ The notes writer added a Docs/Drive client. Conventions specific to it:
   the AST guardrail test (`test_docs_module_write_surface_is_insert_only`) pins that surface. Read a
   file's parents for the folder-ancestry gate via `files.get(fields="parents")`.
 - Same sync `_fn` / `async def` + `asyncio.to_thread` split as the other client modules.
+
+## Calendar day window + multi-calendar merge (goal 7b — `app/google/calendar.py`)
+
+The header-strip day fetch is the first client that queries **more than one calendar** and does an
+in-module merge (a deliberate, narrow exception to "no merging in `app/google/*`" — it's a
+same-shape union, not overlay logic):
+
+- **IST day window:** `_ist_day_bounds(day)` returns `timeMin`/`timeMax` as that IST day's midnight
+  → next midnight (`+05:30` offsets); fetch with `singleEvents=True, orderBy="startTime"`. Keep the
+  bounds a pure helper so a unit test can pin it for an arbitrary date.
+- **Meet link:** `_extract_meet_link` = `hangoutLink`, else the `video` entry in
+  `conferenceData.entryPoints`, else `None` (all-day/no-conference events → `None`).
+- **Multi-calendar:** query `primary` **plus** every id in `EXTRA_CALENDAR_IDS` (comma-separated
+  env, config-only — never LLM/request input). `_merge_events` dedupes by `iCalUID` (first list
+  wins → pass primary first so an invited-attendee duplicate keeps the primary copy) and sorts by
+  start. Extras are **best-effort** (per-calendar try/except → logged warning); a `primary` failure
+  propagates as the `502`.

@@ -1346,41 +1346,6 @@ export function PinnedTasksRow({
 }
 
 /**
- * All non-pinned lists, collapsed by default (ephemeral state, no persistence).
- * Each list keeps its own DndContext (single-list, no cross-list drag) so its
- * behavior is exactly the g4 per-list one. Fully functional when expanded.
- */
-export function OtherTasksSection({ tasks }: { tasks: TasksHook }) {
-  const { taskLists, isLoading, error } = tasks;
-  const [open, setOpen] = useState(false);
-  const allLists = allListRefs(taskLists);
-  const others = taskLists.filter((l) => !PINNED_LIST_TITLES.includes(l.title));
-
-  if (isLoading || error || others.length === 0) return null;
-
-  return (
-    <section className="panel other-tasks">
-      <button
-        className="other-tasks-toggle"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-      >
-        {open ? "▾" : "▸"} Other tasks ({others.length})
-      </button>
-      {open && (
-        <div className="other-lists">
-          {others.map((list) => (
-            <DndListGroup key={list.id} lists={[list]} tasks={tasks}>
-              <TaskListColumn list={list} allLists={allLists} tasks={tasks} />
-            </DndListGroup>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-/**
  * The shared write toasts (action-undo + error). Rendered once for the whole
  * tasks surface — both `.toast` variants are `position: fixed`, so a single
  * mount covers every column. State comes from the one lifted `useTasksPanel`.

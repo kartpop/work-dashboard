@@ -8,6 +8,23 @@ steps see the root [README](../README.md); for milestone history see [goals/](go
 Reads are `GET /tasks` (all lists, merged with the local overlay), plus overlay PATCH and group
 CRUD. Rank and grouping are **overlay-only** — they never sync to Google.
 
+## Calendar: reads (goal 7b)
+
+Read-only; the calendar surface has **zero** write capability.
+
+- `GET /calendar/day?date=YYYY-MM-DD` — one IST calendar day's events for the header strip.
+  `date` is optional (default = today, IST); an invalid value → **400** in the standard error
+  envelope. Returns `{date, events}` where each event is
+  `{id, title, start, end, all_day, meet_link, location, attendees:[{name, email, response_status}]}`.
+  `meet_link` is `hangoutLink`, falling back to the `video` `conferenceData` entry point, else
+  `null`.
+- The day window merges `primary` **plus every id in `EXTRA_CALENDAR_IDS`** (comma-separated
+  env var — the work calendar the owner shared into the personal account; unset → primary-only),
+  deduped by `iCalUID` (the primary copy wins for an invited-attendee duplicate) and sorted by
+  start. Extra calendars are **best-effort**: a failing one logs a warning and the rest still
+  return; a primary failure is a `502`. Calendar IDs are **config-only** — never from LLM output
+  or request payloads (same hygiene rule as the Docs IDs).
+
 ## Write endpoints
 
 Google writes cover task metadata, task content, and list rename — rank/grouping stay overlay-only:

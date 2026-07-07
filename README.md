@@ -21,6 +21,10 @@ see [docs/api-reference.md](docs/api-reference.md); for the milestone history, s
 - **(Notes → Doc, goal 7, optional)** `NOTES_FOLDER_ID` and `NOTES_DOC_ID` in `backend/.env` to
   let high-confidence notes write to a Google Doc. Unset → notes stay kept-local (no crash). See
   the ordered setup in [docs/goals/goal-7-owner-steps.md](docs/goals/goal-7-owner-steps.md).
+- **(Calendar strip, goal 7b, optional)** `EXTRA_CALENDAR_IDS` in `backend/.env` — a
+  comma-separated list of calendar IDs shared into the personal account (e.g. a work calendar);
+  the header strip merges them with `primary`. Unset → primary-only, no crash. Read-only: the
+  already-granted `calendar.readonly` scope covers shared-in calendars; **no re-auth needed**.
 
 ## Running it
 

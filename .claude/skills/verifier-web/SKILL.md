@@ -83,6 +83,17 @@ curl -s -X PATCH http://localhost:8010/tasks/foo/bar/overlay \
   -d '{}' | jq .
 ```
 
+### Calendar day read (goal 7b — read-only)
+
+```bash
+# Today's IST events for the header strip (default = today).
+curl -s http://localhost:8010/calendar/day | jq '.date, (.events[0])'
+# A specific day; each event: {id,title,start,end,all_day,meet_link,location,attendees[]}.
+curl -s 'http://localhost:8010/calendar/day?date=2026-07-08' | jq '.events | length'
+# Invalid date → 400 invalid_date envelope.
+curl -s 'http://localhost:8010/calendar/day?date=nope' | jq .
+```
+
 ### Write endpoints (goal 4 — Google writes)
 
 These mutate Google Tasks (due date + list membership). **Never fire them against a real list** —
@@ -147,7 +158,8 @@ with sync_playwright() as p:
 ```
 
 Key selectors:
-- `.panel` — each surface panel (Tasks, Calendar, …)
+- `.panel` — each surface panel (My Tasks, Follow-ups, Scratchpad). **Goal 7b:** the page is exactly
+  those three; the below-fold Calendar panel and the "Other tasks" section were **removed**.
 - `.task-list-section` — one per Google task list
 - `.date-group` / `.date-group-label` — bucketed date groups (key = bucket key)
 - `.task-item` — individual task row (standalone or within group)
@@ -180,6 +192,20 @@ Key selectors:
   `OVERDUE`); it is render-only — never a drag target.
 
 **No `.priority-badge` selector** — priority was removed in goal 3.
+
+### Goal-7b selectors (calendar header strip)
+- `.dashboard-header` — the flex header row (`<h1>` + the strip).
+- `.calendar-strip` — the whole strip (hidden below the 1080px breakpoint).
+- `.strip-block` (`role="button"`) — a meeting block; single click copies its Meet link, Alt+click
+  opens it in a new tab. `.strip-block-title` is the truncated label.
+- `.strip-tooltip` (`role="tooltip"`) — hover detail (title / time / location / attendees) with a
+  `.tt-open` open-in-new-tab link.
+- `.strip-now` — the red now-marker (present only when viewing **today** and now is in-window).
+- `.strip-chevron` — the ±1h window shifters (disabled at 00:00 / 24:00); `.strip-hint-dot` flags
+  events beyond the visible window.
+- `.strip-daypill` — prev/next-day navigation; `.strip-viewed` — the centered viewed date;
+  `.strip-today` — the jump-back button (present only when viewing a non-today day).
+- `.strip-toast` — the transient "Meet link copied" / "No Meet link for this event" confirmation.
 
 **Goal-4 DnD note:** there is now ONE `<DndContext>` per task list (it spans the list's buckets), so a
 task can be dragged *between* date buckets = reschedule (one `reschedule` POST + optimistic re-bucket).

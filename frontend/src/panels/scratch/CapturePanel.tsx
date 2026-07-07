@@ -65,7 +65,7 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
       const rect = panel.getBoundingClientRect();
       // Dragging down increases editor, up decreases editor
       const offset = e.clientY - rect.top;
-      const ratio = Math.max(0.5, Math.min(0.75, offset / rect.height));
+      const ratio = Math.max(0.5, Math.min(0.85, offset / rect.height));
       panel.style.setProperty("--editor-ratio", ratio.toString());
     };
 
