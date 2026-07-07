@@ -56,11 +56,22 @@ def _extract_meet_link(event: dict) -> str | None:
     return None
 
 
+def _my_response(event: dict) -> str | None:
+    """The owner's own RSVP (`responseStatus` of the `self: true` attendee).
+    None when the event has no attendee entry for the owner (solo/own events) —
+    the strip treats that as accepted."""
+    for a in event.get("attendees", []):
+        if a.get("self"):
+            return a.get("responseStatus")
+    return None
+
+
 def _reshape_event(event: dict) -> dict:
     """Map a raw Google Calendar event to our small, stable strip shape."""
     start = event.get("start", {})
     end = event.get("end", {})
     all_day = "date" in start
+    organizer = event.get("organizer") or {}
     return {
         "id": event["id"],
         "title": event.get("summary"),
@@ -69,6 +80,8 @@ def _reshape_event(event: dict) -> dict:
         "all_day": all_day,
         "meet_link": _extract_meet_link(event),
         "location": event.get("location"),
+        "organizer": organizer.get("displayName") or organizer.get("email"),
+        "my_response": _my_response(event),
         "attendees": [
             {
                 "name": a.get("displayName"),

@@ -48,9 +48,14 @@ def test_reshape_timed_event_with_attendees():
         "end": {"dateTime": "2026-07-07T15:30:00+05:30"},
         "location": "Room 4",
         "hangoutLink": "https://meet.google.com/abc",
+        "organizer": {"displayName": "Ada", "email": "ada@x.com"},
         "attendees": [
             {"displayName": "Ada", "email": "ada@x.com", "responseStatus": "accepted"},
-            {"email": "b@x.com", "responseStatus": "needsAction"},
+            {
+                "email": "b@x.com",
+                "responseStatus": "needsAction",
+                "self": True,
+            },
         ],
     }
     shaped = cal._reshape_event(raw)
@@ -62,6 +67,8 @@ def test_reshape_timed_event_with_attendees():
         "all_day": False,
         "meet_link": "https://meet.google.com/abc",
         "location": "Room 4",
+        "organizer": "Ada",
+        "my_response": "needsAction",
         "attendees": [
             {"name": "Ada", "email": "ada@x.com", "response_status": "accepted"},
             {"name": None, "email": "b@x.com", "response_status": "needsAction"},
@@ -81,6 +88,24 @@ def test_reshape_all_day_event():
     assert shaped["start"] == "2026-07-07"
     assert shaped["meet_link"] is None
     assert shaped["attendees"] == []
+    # No attendees → no RSVP entry for the owner; the strip treats None as accepted.
+    assert shaped["my_response"] is None
+    assert shaped["organizer"] is None
+
+
+def test_my_response_from_self_attendee():
+    event = {
+        "attendees": [
+            {"email": "other@x.com", "responseStatus": "accepted"},
+            {"email": "me@x.com", "responseStatus": "declined", "self": True},
+        ]
+    }
+    assert cal._my_response(event) == "declined"
+
+
+def test_my_response_none_without_self_attendee():
+    assert cal._my_response({"attendees": [{"email": "o@x.com"}]}) is None
+    assert cal._my_response({}) is None
 
 
 def test_merge_sorts_by_start_and_dedupes_ical_uid():
