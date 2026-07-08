@@ -113,22 +113,31 @@ def build_flow(state: str | None = None) -> Flow:
     )
 
 
-def authorization_url() -> tuple[str, str]:
-    """Return (url, state) for the consent redirect. `access_type=offline` +
-    `prompt=consent` guarantees a refresh token even on repeat sign-ins."""
+def authorization_url() -> tuple[str, str, str | None]:
+    """Return (url, state, code_verifier) for the consent redirect.
+
+    google_auth_oauthlib ≥1.2 auto-generates a PKCE code_verifier and embeds the
+    challenge in the URL. The verifier must round-trip through the session so
+    exchange_code can include it; older library versions leave it None (no-op).
+    """
     flow = build_flow()
     url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
     )
-    return url, state
+    code_verifier: str | None = getattr(flow, "code_verifier", None)
+    return url, state, code_verifier
 
 
-def exchange_code(code: str, state: str | None = None) -> Credentials:
+def exchange_code(
+    code: str,
+    state: str | None = None,
+    code_verifier: str | None = None,
+) -> Credentials:
     """Exchange an authorization code for credentials (access + refresh token)."""
     flow = build_flow(state=state)
-    flow.fetch_token(code=code)
+    flow.fetch_token(code=code, code_verifier=code_verifier)
     return flow.credentials
 
 

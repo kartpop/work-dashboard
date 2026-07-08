@@ -12,7 +12,7 @@ Skip this section if you're starting from a fresh clone.
 
 If you ran the app before goal-8 (InstalledAppFlow + `.google-tokens/`):
 
-- [ ] Delete `.google-tokens/` from the repo root — the CLI token file is gone,
+- [ ] Delete `.google-tokens/` from the `backend/` — the CLI token file is gone,
       each user's token now lives encrypted in the DB.
 - [ ] Remove `NOTES_FOLDER_ID`, `NOTES_DOC_ID`, `EXTRA_CALENDAR_IDS` from
       `backend/.env` — these are replaced by per-user settings in the DB.

@@ -17,7 +17,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa
 from starlette.middleware.sessions import SessionMiddleware  # noqa: E402
 
 from app.auth.router import router as auth_router  # noqa: E402
-from app.db import create_tables  # noqa: E402
 from app.router import scheduler as router_scheduler  # noqa: E402
 from app.routers import calendar, scratch, tasks  # noqa: E402
 from app.settings.router import router as settings_router  # noqa: E402
@@ -34,9 +33,8 @@ _FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Scope assertion moved to per-token load (app.google.auth.load_credentials) — a
-    # broader-than-allowlist grant now refuses to serve that ONE user, fail-closed.
-    create_tables()
+    # Schema is managed by Alembic (alembic upgrade head runs in docker-entrypoint.sh
+    # and is documented as a manual step for local dev — don't call create_all here).
     router_scheduler.start()
     try:
         yield

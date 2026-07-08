@@ -35,8 +35,10 @@ def _frontend_url(path: str = "/") -> str:
 @router.get("/login")
 async def login(request: Request):
     """Redirect to Google's consent screen; stash the CSRF `state` in the session."""
-    url, state = google_auth.authorization_url()
+    url, state, code_verifier = google_auth.authorization_url()
     request.session["oauth_state"] = state
+    if code_verifier is not None:
+        request.session["oauth_code_verifier"] = code_verifier
     return RedirectResponse(url)
 
 
@@ -49,13 +51,16 @@ async def callback(
     session: Session = Depends(get_session),
 ):
     saved_state = request.session.pop("oauth_state", None)
+    code_verifier = request.session.pop("oauth_code_verifier", None)
     if error or not code:
         return RedirectResponse(_frontend_url("/?auth_error=denied"))
     if saved_state and state and saved_state != state:
         return RedirectResponse(_frontend_url("/?auth_error=state_mismatch"))
 
     try:
-        creds = google_auth.exchange_code(code, state=state)
+        creds = google_auth.exchange_code(
+            code, state=state, code_verifier=code_verifier
+        )
         claims = google_auth.verify_id_token(creds.id_token)
     except Exception as exc:  # noqa: BLE001 — any exchange/verify failure → bounce
         logger.warning("OAuth callback failed: %s", exc)
