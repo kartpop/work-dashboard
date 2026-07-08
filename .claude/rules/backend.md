@@ -30,3 +30,26 @@ paths: ["backend/**"]
 - Use `async def` for all route handlers and I/O (DB, HTTP); wrap blocking calls (e.g. the
   Google API client's `.execute()`) in `asyncio.to_thread(...)` — see the private sync
   `_fetch_*` / public async `get_*` split in `app/google/tasks.py` and `calendar.py`.
+
+## Auth + multi-tenancy (goal 8) — HARD RULES
+
+- **Every user-owned query filters by `current_user.id`.** Not optional. Handlers take
+  `user: User = Depends(get_current_user)` (from `app/auth/deps.py`) and pass `user.id` into the
+  service; services filter every `select(...)` / `session.get(...)` by `user_id`. Never trust a
+  `user_id` from a request path/body. `TaskOverlay`'s PK is `(user_id, tasklist_id, task_id)` —
+  `session.get(TaskOverlay, (user_id, tasklist_id, task_id))`. New user-owned tables get a
+  `user_id` FK to `user.id`. The headline test is two-user isolation: a second user must never
+  read or mutate the first's rows by id.
+- **Google credentials are per-user and passed explicitly.** Every `app/google/*` function takes a
+  live `creds: Credentials` as its FIRST arg; handlers get it from
+  `creds: Credentials = Depends(get_current_credentials)` and thread it through the service into the
+  client. There is **no** global credential load anymore. `app/google/auth.py`
+  `load_credentials(session, user)` builds it from the user's Fernet-encrypted refresh token and
+  runs the **per-token** scope assertion (a broader-than-allowlist grant → `ScopeError` → 403).
+- **Sessions:** Starlette `SessionMiddleware` (signed `HttpOnly`/`Secure`/`SameSite=Lax` cookie).
+  `get_current_user` reads `request.session["user_id"]`; unauthenticated → 401. `require_superuser`
+  gates the allowed-email admin (403 otherwise).
+- **Per-user config replaced env vars.** `app/settings/service.py` owns `user_settings`: calendar
+  toggle ids (`enabled_calendar_ids`, JSON) and the app-created notes folder/Doc ids
+  (`ensure_notes_target` bootstraps them on first need). `NOTES_*` / `EXTRA_CALENDAR_IDS` and
+  `app.google.bootstrap` are gone — never reintroduce them.

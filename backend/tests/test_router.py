@@ -6,8 +6,11 @@ network. The guardrail tests are the gate-critical ones: they prove routing can 
 reach a destructive Google writer (statically via AST, and dynamically by recording
 every call across every routing path).
 
-Service functions are async; sync tests drive them with `run(...)` (asyncio.run) so we
-need no async-pytest plugin.
+Goal 8: `route_entry`/`confirm_review` take the full `User` + live `creds`; every
+Google client fn takes `creds` first; scratch/review rows are user-scoped; and a note's
+Doc is the user's own — auto-bootstrapped via `settings_svc.ensure_notes_target`
+(create_folder → create_doc_in_folder), not an env var. Service functions are async;
+sync tests drive them with `run(...)` (asyncio.run) so we need no async-pytest plugin.
 """
 
 from __future__ import annotations
@@ -17,13 +20,11 @@ import asyncio
 import inspect
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import select
 
-from app.db import get_session
+from tests.conftest import DummyCreds
+
 from app.errors import ApiError
-from app.main import app
 from app.router import service as router_svc
 from app.router.models import (
     IN_REVIEW,
@@ -45,53 +46,28 @@ def run(coro):
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def engine():
-    eng = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
-    SQLModel.metadata.create_all(eng)
-    yield eng
-    SQLModel.metadata.drop_all(eng)
-
-
-@pytest.fixture
-def session(engine):
-    with Session(engine) as s:
-        yield s
-
-
-@pytest.fixture
-def client(engine):
-    def _override():
-        with Session(engine) as s:
-            yield s
-
-    app.dependency_overrides[get_session] = _override
-    yield TestClient(app)
-    app.dependency_overrides.clear()
-
-
 class Google:
-    """Records every Google write so we can assert what routing did (and didn't) touch."""
+    """Records every Google write so we can assert what routing did (and didn't) touch.
+
+    Every wrapper takes `creds` first (goal 8); it is dropped from the recorded tuple."""
 
     def __init__(self):
         self.calls: list[tuple] = []
         self.tasks: dict[tuple[str, str], dict] = {}
         self._next_id = 0
 
-    async def get_task_lists(self):
+    async def get_task_lists(self, creds):
         self.calls.append(("get_task_lists",))
         return [
             {"id": "L1", "title": "My Tasks", "tasks": []},
             {"id": "L2", "title": "Followups", "tasks": []},
         ]
 
-    async def get_task(self, list_id, task_id):
+    async def get_task(self, creds, list_id, task_id):
         self.calls.append(("get_task", list_id, task_id))
         return self.tasks.get((list_id, task_id))
 
-    async def insert_task(self, list_id, body):
+    async def insert_task(self, creds, list_id, body):
         self.calls.append(("insert_task", list_id, body))
         self._next_id += 1
         tid = f"new-{self._next_id}"
@@ -106,13 +82,13 @@ class Google:
         self.tasks[(list_id, tid)] = task
         return task
 
-    async def update_due_date(self, list_id, task_id, due):
+    async def update_due_date(self, creds, list_id, task_id, due):
         self.calls.append(("update_due_date", list_id, task_id, due))
 
-    async def delete_task(self, list_id, task_id):  # must NEVER be called by routing
+    async def delete_task(self, creds, list_id, task_id):  # must NEVER be routed
         self.calls.append(("delete_task", list_id, task_id))
 
-    async def update_task_content(self, list_id, task_id, **fields):  # never by routing
+    async def update_task_content(self, creds, list_id, task_id, **fields):  # never
         self.calls.append(("update_task_content", list_id, task_id, fields))
         return self.tasks.get((list_id, task_id), {"id": task_id})
 
@@ -147,23 +123,37 @@ def fake_classify(monkeypatch):
 
 @pytest.fixture
 def notes(monkeypatch):
-    """Mock the goal-7 Docs/Drive surface: record note inserts, script folder
-    ancestry, and start from an unconfigured (kept-local) env with a clean cache."""
+    """Mock the goal-8 Docs/Drive surface + the notes-target bootstrap.
+
+    A note's Doc is the user's own, auto-created on first need: the router calls
+    `settings_svc.ensure_notes_target`, which — with unset UserSettings ids — calls
+    `create_folder` then `create_doc_in_folder`, then `append_note` runs its ancestry
+    gate (`get_parents`) + `insert_note`. We record inserts and make ancestry pass
+    (parents of the created doc include the created folder)."""
     from app.writes import service as writes_svc
 
     writes_svc._ancestry_ok.clear()
-    rec = {"insert": [], "parents": {}}
+    rec = {"insert": [], "folder_id": "FOLDER-boot", "doc_id": "DOC-boot"}
 
-    async def _get_parents(file_id):
-        return rec["parents"].get(file_id, [])
+    async def _create_folder(creds, name):
+        return rec["folder_id"]
 
-    async def _insert_note(doc_id, heading, body, summary=None):
+    async def _create_doc_in_folder(creds, title, folder_id):
+        return rec["doc_id"]
+
+    async def _get_parents(creds, file_id):
+        # The bootstrapped doc lives directly in the bootstrapped folder.
+        if file_id == rec["doc_id"]:
+            return [rec["folder_id"]]
+        return []
+
+    async def _insert_note(creds, doc_id, heading, body, summary=None):
         rec["insert"].append((doc_id, heading, body, summary))
 
+    monkeypatch.setattr("app.google.docs.create_folder", _create_folder)
+    monkeypatch.setattr("app.google.docs.create_doc_in_folder", _create_doc_in_folder)
     monkeypatch.setattr("app.google.docs.get_parents", _get_parents)
     monkeypatch.setattr("app.google.docs.insert_note", _insert_note)
-    monkeypatch.delenv("NOTES_DOC_ID", raising=False)
-    monkeypatch.delenv("NOTES_FOLDER_ID", raising=False)
     return rec
 
 
@@ -173,8 +163,8 @@ def _set(holder, destination, confidence, **fields):
     )
 
 
-def _entry(session, text="something"):
-    e = ScratchEntry(text=text)
+def _entry(session, user, text="something"):
+    e = ScratchEntry(user_id=user.id, text=text)
     session.add(e)
     session.commit()
     session.refresh(e)
@@ -184,9 +174,16 @@ def _entry(session, text="something"):
 # ── Dispose: each destination ─────────────────────────────────────────────────
 
 
-def test_high_conf_task_creates_one_task(session, google, fake_classify):
+def test_high_conf_task_creates_one_task(session, user_a, google, fake_classify):
     _set(fake_classify, "task", 0.95, title="call plumber", due_date="2026-06-20")
-    state = run(router_svc.route_entry(session, _entry(session, "call plumber friday")))
+    state = run(
+        router_svc.route_entry(
+            session,
+            user_a,
+            DummyCreds(),
+            _entry(session, user_a, "call plumber friday"),
+        )
+    )
     assert state == ROUTED_TASK
     assert google.names().count("insert_task") == 1
     assert "update_due_date" in google.names()  # due via reschedule (metadata)
@@ -194,115 +191,125 @@ def test_high_conf_task_creates_one_task(session, google, fake_classify):
     assert "update_task_content" not in google.names()
 
 
-def test_high_conf_note_kept_local_when_doc_unset(
-    session, google, fake_classify, notes
+def test_high_conf_note_bootstraps_doc_and_writes_verbatim(
+    session, user_a, google, fake_classify, notes
 ):
-    """NOTES_DOC_ID unset → note kept local, warning logged, no Google write."""
-    _set(fake_classify, "note", 0.9, note_text="vsauce entropy video")
-    state = run(router_svc.route_entry(session, _entry(session, "remember vsauce")))
-    assert state == KEPT_NOTE
-    assert google.calls == []  # no task write of any kind
-    assert notes["insert"] == []  # no Docs write either
-
-
-def test_high_conf_note_writes_verbatim_to_doc(
-    session, google, fake_classify, notes, monkeypatch
-):
-    """NOTES_DOC_ID set + ancestry OK → exactly one Docs insert, body VERBATIM
-    (bullets as literal text), H3 timestamp heading; no task write."""
-    monkeypatch.setenv("NOTES_DOC_ID", "DOC1")
-    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
-    notes["parents"]["DOC1"] = ["FOLDER1"]  # doc lives directly in the folder
+    """Goal 8: with no notes Doc yet, the router bootstraps the user's own folder+Doc
+    (`ensure_notes_target`), then writes exactly one verbatim Docs insert under an H3
+    timestamp — no task write. Replaces the old NOTES_DOC_ID-unset kept-local test."""
     _set(fake_classify, "note", 0.95, note_text="cleaned — but body must be verbatim")
     body = "- strategy idea\n  - sub point\n- another line"
-    state = run(router_svc.route_entry(session, _entry(session, body)))
+    state = run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, body)
+        )
+    )
     assert state == KEPT_NOTE
     assert len(notes["insert"]) == 1
     doc_id, heading, written, _summary = notes["insert"][0]
-    assert doc_id == "DOC1"
+    assert doc_id == notes["doc_id"]  # the app-bootstrapped Doc
     assert written == body  # verbatim — bullets/indentation preserved
     assert heading.endswith("IST")
     assert "insert_task" not in google.names()
 
 
 def test_note_ancestry_gate_rejects_doc_outside_folder(
-    session, google, fake_classify, notes, monkeypatch
+    session, user_a, google, fake_classify, notes, monkeypatch
 ):
-    """A doc whose parents don't reach NOTES_FOLDER_ID is rejected fail-closed —
-    no insert, entry left re-routable."""
-    monkeypatch.setenv("NOTES_DOC_ID", "DOC2")
-    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
-    notes["parents"]["DOC2"] = ["SOME_OTHER_FOLDER"]
+    """A doc whose parents don't reach the notes folder is rejected fail-closed — no
+    insert, entry left re-routable."""
+
+    async def _bad_parents(creds, file_id):
+        return ["SOME_OTHER_FOLDER"]
+
+    monkeypatch.setattr("app.google.docs.get_parents", _bad_parents)
     _set(fake_classify, "note", 0.95, note_text="x")
-    entry = _entry(session, "note outside the folder")
+    entry = _entry(session, user_a, "note outside the folder")
     with pytest.raises(ApiError):
-        run(router_svc.route_entry(session, entry))
+        run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
     assert notes["insert"] == []
     session.expire_all()
     assert session.get(ScratchEntry, entry.id).routing_state == UNROUTED
 
 
 def test_note_docs_failure_leaves_entry_unrouted(
-    session, google, fake_classify, notes, monkeypatch
+    session, user_a, google, fake_classify, notes, monkeypatch
 ):
     """A Docs write failure surfaces (never swallowed) and leaves the entry
     re-routable — route-once marks routed only on a successful append."""
-    monkeypatch.setenv("NOTES_DOC_ID", "DOC3")
-    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
-    notes["parents"]["DOC3"] = ["FOLDER1"]
 
-    async def _boom(doc_id, heading, body):
+    async def _boom(creds, doc_id, heading, body, summary=None):
         raise RuntimeError("docs down")
 
     monkeypatch.setattr("app.google.docs.insert_note", _boom)
     _set(fake_classify, "note", 0.95, note_text="x")
-    entry = _entry(session, "boom note")
+    entry = _entry(session, user_a, "boom note")
     with pytest.raises(ApiError):
-        run(router_svc.route_entry(session, entry))
+        run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
     session.expire_all()
     assert session.get(ScratchEntry, entry.id).routing_state == UNROUTED
 
 
-def test_event_goes_to_review_no_writes(session, google, fake_classify):
+def test_event_goes_to_review_no_writes(session, user_a, google, fake_classify):
     _set(fake_classify, "event", 0.95, title="lunch", event_datetime="thu 1pm")
-    state = run(router_svc.route_entry(session, _entry(session, "lunch with Tejas")))
+    state = run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, "lunch with Tejas")
+        )
+    )
     assert state == IN_REVIEW
     assert google.calls == []
     rows = session.exec(select(ReviewItem)).all()
     assert len(rows) == 1 and rows[0].status == PENDING
 
 
-def test_unknown_goes_to_review(session, google, fake_classify):
+def test_unknown_goes_to_review(session, user_a, google, fake_classify):
     _set(fake_classify, "unknown", 0.1)
-    assert run(router_svc.route_entry(session, _entry(session, "huh"))) == IN_REVIEW
+    assert (
+        run(
+            router_svc.route_entry(
+                session, user_a, DummyCreds(), _entry(session, user_a, "huh")
+            )
+        )
+        == IN_REVIEW
+    )
     assert google.calls == []
 
 
-def test_low_confidence_task_goes_to_review_not_written(session, google, fake_classify):
+def test_low_confidence_task_goes_to_review_not_written(
+    session, user_a, google, fake_classify
+):
     _set(fake_classify, "task", 0.4, title="maybe ping someone")
-    assert run(router_svc.route_entry(session, _entry(session, "ping?"))) == IN_REVIEW
+    assert (
+        run(
+            router_svc.route_entry(
+                session, user_a, DummyCreds(), _entry(session, user_a, "ping?")
+            )
+        )
+        == IN_REVIEW
+    )
     assert "insert_task" not in google.names()
 
 
 # ── Route-once idempotency ────────────────────────────────────────────────────
 
 
-def test_route_once_does_not_recreate(session, google, fake_classify):
+def test_route_once_does_not_recreate(session, user_a, google, fake_classify):
     _set(fake_classify, "task", 0.95, title="buy milk")
-    entry = _entry(session, "buy milk")
-    run(router_svc.route_entry(session, entry))
-    state2 = run(router_svc.route_entry(session, entry))  # already routed → no-op
+    entry = _entry(session, user_a, "buy milk")
+    run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
+    state2 = run(router_svc.route_entry(session, user_a, DummyCreds(), entry))  # no-op
     assert state2 == ROUTED_TASK
     assert google.names().count("insert_task") == 1
 
 
-def test_route_unrouted_tally_then_noop(session, google, fake_classify):
+def test_route_unrouted_tally_then_noop(session, user_a, google, fake_classify, notes):
     _set(fake_classify, "note", 0.95, note_text="x")
     for _ in range(3):
-        _entry(session, "a note")
-    tally = run(router_svc.route_unrouted(session))
+        _entry(session, user_a, "a note")
+    tally = run(router_svc.route_unrouted(session, user_a, DummyCreds()))
     assert tally["kept_note"] == 3
-    assert run(router_svc.route_unrouted(session)) == {
+    assert run(router_svc.route_unrouted(session, user_a, DummyCreds())) == {
         "routed_task": 0,
         "kept_note": 0,
         "in_review": 0,
@@ -313,7 +320,9 @@ def test_route_unrouted_tally_then_noop(session, google, fake_classify):
 # ── THE GUARDRAIL ─────────────────────────────────────────────────────────────
 
 
-def test_router_never_calls_delete_or_status(session, google, fake_classify, notes):
+def test_router_never_calls_delete_or_status(
+    session, user_a, google, fake_classify, notes
+):
     """Drive every routing destination; assert delete_task and the status/complete
     write are NEVER called — the insert-only blast-radius contract, dynamically."""
     scenarios = [
@@ -326,7 +335,11 @@ def test_router_never_calls_delete_or_status(session, google, fake_classify, not
     ]
     for dest, conf, fields in scenarios:
         _set(fake_classify, dest, conf, **fields)
-        run(router_svc.route_entry(session, _entry(session, f"{dest} case")))
+        run(
+            router_svc.route_entry(
+                session, user_a, DummyCreds(), _entry(session, user_a, f"{dest} case")
+            )
+        )
 
     forbidden = {"delete_task", "update_task_content"}
     assert forbidden.isdisjoint(google.names()), google.names()
@@ -353,7 +366,7 @@ def test_router_write_dependency_set_is_insert_only():
 def test_docs_module_write_surface_is_insert_only():
     """Statically: the Docs/Drive client never deletes a file or does a
     content-overwriting `files().update` — the only mutations are the insert-only
-    `documents().batchUpdate` and the single sanctioned `files().create` (bootstrap).
+    `documents().batchUpdate` and the sanctioned `files().create` (bootstrap).
     Drive-access-scoping ADR, layer 5."""
     from app.google import docs as docs_mod
 
@@ -366,24 +379,24 @@ def test_docs_module_write_surface_is_insert_only():
     assert "delete" not in called_methods, called_methods
     assert "update" not in called_methods, called_methods  # no files().update overwrite
     assert "batchUpdate" in called_methods  # the insert-only note write
-    assert "create" in called_methods  # the one sanctioned file-create (bootstrap)
+    assert "create" in called_methods  # the sanctioned file-create (bootstrap)
 
 
 # ── Write-failure leaves the entry re-routable ────────────────────────────────
 
 
 def test_write_failure_leaves_entry_unrouted(
-    session, monkeypatch, google, fake_classify
+    session, user_a, monkeypatch, google, fake_classify
 ):
     _set(fake_classify, "task", 0.95, title="boom")
 
-    async def _boom(list_id, body):
+    async def _boom(creds, list_id, body):
         raise RuntimeError("google down")
 
     monkeypatch.setattr("app.google.tasks.insert_task", _boom)
-    entry = _entry(session, "boom")
+    entry = _entry(session, user_a, "boom")
     with pytest.raises(ApiError):
-        run(router_svc.route_entry(session, entry))
+        run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
     session.expire_all()
     assert session.get(ScratchEntry, entry.id).routing_state == UNROUTED
 
@@ -391,13 +404,19 @@ def test_write_failure_leaves_entry_unrouted(
 # ── Review queue dispositions ─────────────────────────────────────────────────
 
 
-def test_confirm_task_review_fires_one_create(session, google, fake_classify):
+def test_confirm_task_review_fires_one_create(session, user_a, google, fake_classify):
     _set(fake_classify, "event", 0.95, title="lunch")  # lands in review
-    run(router_svc.route_entry(session, _entry(session, "lunch maybe")))
+    run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, "lunch maybe")
+        )
+    )
     item = session.exec(select(ReviewItem)).first()
     res = run(
         router_svc.confirm_review(
             session,
+            user_a,
+            DummyCreds(),
             item.id,
             destination="task",
             fields=RouterFields(title="lunch with Tejas", due_date="2026-06-20"),
@@ -407,23 +426,27 @@ def test_confirm_task_review_fires_one_create(session, google, fake_classify):
     assert google.names().count("insert_task") == 1
 
 
-def test_dismiss_writes_nothing(session, google, fake_classify):
+def test_dismiss_writes_nothing(session, user_a, google, fake_classify):
     _set(fake_classify, "unknown", 0.1)
-    entry = _entry(session, "huh")
-    run(router_svc.route_entry(session, entry))
+    entry = _entry(session, user_a, "huh")
+    run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
     item = session.exec(select(ReviewItem)).first()
-    res = run(router_svc.dismiss_review(session, item.id))
+    res = run(router_svc.dismiss_review(session, user_a, item.id))
     assert res["status"] == "dismissed"
     assert google.calls == []
     session.expire_all()
     assert session.get(ScratchEntry, entry.id).routing_state == RESOLVED
 
 
-def test_confirm_event_acknowledges_no_write(session, google, fake_classify):
+def test_confirm_event_acknowledges_no_write(session, user_a, google, fake_classify):
     _set(fake_classify, "event", 0.95, title="standup")
-    run(router_svc.route_entry(session, _entry(session, "standup 10am")))
+    run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, "standup 10am")
+        )
+    )
     item = session.exec(select(ReviewItem)).first()
-    res = run(router_svc.confirm_review(session, item.id))  # confirm as-is (event)
+    res = run(router_svc.confirm_review(session, user_a, DummyCreds(), item.id))
     assert res["entry_state"] == RESOLVED
     assert "insert_task" not in google.names()
 
@@ -458,7 +481,7 @@ def test_capture_inline_failure_leaves_unrouted(
     """A Google failure during inline routing still returns 2xx (capture never
     lost) and leaves the entry UNROUTED for the scheduler backstop to retry."""
 
-    async def _boom(list_id, body):
+    async def _boom(creds, list_id, body):
         raise RuntimeError("google down")
 
     monkeypatch.setattr("app.google.tasks.insert_task", _boom)
@@ -498,6 +521,64 @@ def test_review_confirm_endpoint(client, google, fake_classify):
     assert r.status_code == 200 and r.json()["entry_state"] == ROUTED_TASK
     assert google.names().count("insert_task") == 1
     assert client.get("/review").json()["items"] == []  # left the queue
+
+
+# ── Two-user isolation (goal 8 headline AC) ─────────────────────────────────────
+
+
+def test_scratch_list_is_per_user(auth, user_a, user_b, session, google, fake_classify):
+    """B's GET /scratch returns only B's entries — A's captures are invisible."""
+    _set(fake_classify, "unknown", 0.1)  # everything lands in review, no writes
+    client_a = auth.as_user(user_a)
+    client_a.post("/scratch", json={"text": "a-secret"})
+    client_b = auth.as_user(user_b)
+    client_b.post("/scratch", json={"text": "b-thought"})
+
+    texts_b = [e["text"] for e in client_b.get("/scratch").json()["entries"]]
+    assert texts_b == ["b-thought"]
+    texts_a = [
+        e["text"] for e in auth.as_user(user_a).get("/scratch").json()["entries"]
+    ]
+    assert texts_a == ["a-secret"]
+
+
+def test_cannot_confirm_or_dismiss_other_users_review(
+    auth, user_a, user_b, session, google, fake_classify
+):
+    """B cannot confirm or dismiss A's review item — 404 (no cross-tenant read by id)."""
+    _set(fake_classify, "event", 0.95, title="lunch")  # → review inline for A
+    client_a = auth.as_user(user_a)
+    client_a.post("/scratch", json={"text": "a's lunch"})
+    item_id = client_a.get("/review").json()["items"][0]["id"]
+
+    client_b = auth.as_user(user_b)
+    assert (
+        client_b.post(
+            f"/review/{item_id}/confirm", json={"destination": "task"}
+        ).status_code
+        == 404
+    )
+    assert client_b.post(f"/review/{item_id}/dismiss").status_code == 404
+    # A's item is still pending + no Google write leaked.
+    assert len(auth.as_user(user_a).get("/review").json()["items"]) == 1
+    assert "insert_task" not in google.names()
+
+
+def test_review_queries_are_user_scoped(session, user_a, user_b, google, fake_classify):
+    """Service-level: a review item created for A is invisible to B (404 on lookup)."""
+    _set(fake_classify, "unknown", 0.1)
+    run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, "a thought")
+        )
+    )
+    item = session.exec(select(ReviewItem)).first()
+    # B cannot dismiss A's item.
+    with pytest.raises(ApiError):
+        run(router_svc.dismiss_review(session, user_b, item.id))
+    # A can.
+    res = run(router_svc.dismiss_review(session, user_a, item.id))
+    assert res["status"] == "dismissed"
 
 
 # ── Pure eval scorer (no API) ─────────────────────────────────────────────────
@@ -572,7 +653,8 @@ def test_format_note_heading_locked_format():
 
 def test_insert_note_puts_h3_timestamp_at_top(monkeypatch):
     """The batchUpdate inserts at index 1 (top of body), heading first with an H3
-    paragraph style — newest note lands above everything else."""
+    paragraph style — newest note lands above everything else. `insert_note` now
+    takes `creds` first (pass a dummy)."""
     from app.google import docs as docs_mod
 
     captured = {}
@@ -589,8 +671,12 @@ def test_insert_note_puts_h3_timestamp_at_top(monkeypatch):
         def execute(self):
             return {}
 
-    monkeypatch.setattr(docs_mod, "_docs_service", lambda: FakeDocs())
-    run(docs_mod.insert_note("DOC", "6-July-2026, 8:41 PM IST", "- a\n- b"))
+    monkeypatch.setattr(docs_mod, "_docs_service", lambda _creds: FakeDocs())
+    run(
+        docs_mod.insert_note(
+            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "- a\n- b"
+        )
+    )
 
     reqs = captured["requests"]
     assert captured["documentId"] == "DOC"
@@ -627,7 +713,7 @@ def _capture_batchupdate(monkeypatch):
         def execute(self):
             return {}
 
-    monkeypatch.setattr(docs_mod, "_docs_service", lambda: FakeDocs())
+    monkeypatch.setattr(docs_mod, "_docs_service", lambda _creds: FakeDocs())
     return captured
 
 
@@ -639,7 +725,7 @@ def test_insert_note_with_summary_bold_one_liner(monkeypatch):
     captured = _capture_batchupdate(monkeypatch)
     run(
         docs_mod.insert_note(
-            "DOC", "6-July-2026, 8:41 PM IST", "- a\n- b", "milk + eggs"
+            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "- a\n- b", "milk + eggs"
         )
     )
     reqs = captured["requests"]
@@ -667,21 +753,26 @@ def test_insert_note_empty_summary_degrades_to_g7_shape(monkeypatch):
     from app.google import docs as docs_mod
 
     captured = _capture_batchupdate(monkeypatch)
-    run(docs_mod.insert_note("DOC", "6-July-2026, 8:41 PM IST", "- a", "   "))
+    run(
+        docs_mod.insert_note(
+            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "- a", "   "
+        )
+    )
     reqs = captured["requests"]
     assert reqs[0]["insertText"]["text"] == "6-July-2026, 8:41 PM IST\n- a\n\n"
     assert not any("updateTextStyle" in r for r in reqs)
 
 
 def test_auto_route_note_passes_summary_through(
-    session, google, fake_classify, notes, monkeypatch
+    session, user_a, google, fake_classify, notes
 ):
     """A high-confidence note carries the classifier's summary into the Doc write."""
-    monkeypatch.setenv("NOTES_DOC_ID", "DOC1")
-    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
-    notes["parents"]["DOC1"] = ["FOLDER1"]
     _set(fake_classify, "note", 0.95, note_text="x", summary="entropy video")
-    state = run(router_svc.route_entry(session, _entry(session, "raw verbatim text")))
+    state = run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, "raw verbatim text")
+        )
+    )
     assert state == KEPT_NOTE
     doc_id, heading, body, summary = notes["insert"][0]
     assert body == "raw verbatim text"  # raw stays verbatim
@@ -689,36 +780,44 @@ def test_auto_route_note_passes_summary_through(
 
 
 def test_confirm_as_note_review_writes_to_doc(
-    session, google, fake_classify, notes, monkeypatch
+    session, user_a, google, fake_classify, notes
 ):
     """Confirm-as-note in review fires exactly one Docs append (the panel copy now
     promises this)."""
-    monkeypatch.setenv("NOTES_DOC_ID", "DOC1")
-    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
-    notes["parents"]["DOC1"] = ["FOLDER1"]
     _set(fake_classify, "unknown", 0.1)  # lands in review
-    run(router_svc.route_entry(session, _entry(session, "- a stray thought")))
+    run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, "- a stray thought")
+        )
+    )
     item = session.exec(select(ReviewItem)).first()
-    res = run(router_svc.confirm_review(session, item.id, destination="note"))
+    res = run(
+        router_svc.confirm_review(
+            session, user_a, DummyCreds(), item.id, destination="note"
+        )
+    )
     assert res["entry_state"] == KEPT_NOTE
     assert len(notes["insert"]) == 1
     assert notes["insert"][0][2] == "- a stray thought"  # verbatim entry text
 
 
 def test_confirm_as_note_uses_edited_body_and_one_liner(
-    session, google, fake_classify, notes, monkeypatch
+    session, user_a, google, fake_classify, notes
 ):
     """Goal 7c: review edits win — a user-edited note body + one-liner are what
     land in the Doc, not the raw captured text."""
-    monkeypatch.setenv("NOTES_DOC_ID", "DOC1")
-    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
-    notes["parents"]["DOC1"] = ["FOLDER1"]
     _set(fake_classify, "unknown", 0.1)  # lands in review
-    run(router_svc.route_entry(session, _entry(session, "raw capture text")))
+    run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, "raw capture text")
+        )
+    )
     item = session.exec(select(ReviewItem)).first()
     res = run(
         router_svc.confirm_review(
             session,
+            user_a,
+            DummyCreds(),
             item.id,
             destination="note",
             fields=RouterFields(note_text="cleaned body", summary="a headline"),
@@ -730,14 +829,9 @@ def test_confirm_as_note_uses_edited_body_and_one_liner(
     assert summary == "a headline"
 
 
-def test_review_note_endpoint_overrides(
-    client, google, fake_classify, notes, monkeypatch
-):
+def test_review_note_endpoint_overrides(client, google, fake_classify, notes):
     """The /confirm endpoint threads note_text + summary overrides through to the
     Doc write (task | note only in the UI; the endpoint honors both)."""
-    monkeypatch.setenv("NOTES_DOC_ID", "DOC1")
-    monkeypatch.setenv("NOTES_FOLDER_ID", "FOLDER1")
-    notes["parents"]["DOC1"] = ["FOLDER1"]
     _set(fake_classify, "event", 0.95, title="lunch")  # → review inline
     client.post("/scratch", json={"text": "some thought"})
     item = client.get("/review").json()["items"][0]

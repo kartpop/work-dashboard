@@ -1,0 +1,48 @@
+# Single small EC2 host (goal 8): one app container (FastAPI serving the built SPA)
+# behind Caddy for automatic Let's Encrypt TLS. SQLite persists on a named volume.
+#
+# Secrets come from .env.prod (see .env.prod.example). Bring up with:
+#   docker compose --env-file .env.prod up -d --build
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      # Sessions require HTTPS-only Secure cookies in prod (Caddy terminates TLS).
+      COOKIE_SECURE: "1"
+    volumes:
+      - dashboard-data:/data
+      # The OAuth web-client secret, mounted read-only (never baked into the image).
+      - ./client_secret.json:/srv/backend/client_secret.json:ro
+    expose:
+      - "8010"
+    healthcheck:
+      # /auth/me returns 401 unauthenticated — any HTTP response means the app is up,
+      # so we drop `-f` (which would treat the 401 as a failure).
+      test: ["CMD", "curl", "-sS", "-o", "/dev/null", "http://localhost:8010/auth/me"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+
+volumes:
+  dashboard-data:
+  caddy-data:
+  caddy-config:

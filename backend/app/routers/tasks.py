@@ -2,17 +2,20 @@ import logging
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
+from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
-logger = logging.getLogger(__name__)
-
+from app.auth.deps import get_current_credentials, get_current_user
+from app.auth.models import User
 from app.db import get_session
 from app.errors import ApiError
 from app.google import tasks as tasks_client
 from app.overlay import service as overlay_svc
 from app.writes import service as writes_svc
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -21,10 +24,12 @@ router = APIRouter()
 async def list_tasks(
     view: Annotated[Literal["grouped", "flat"], Query()] = "grouped",
     show_completed: Annotated[bool, Query()] = False,
+    user: User = Depends(get_current_user),
+    creds: Credentials = Depends(get_current_credentials),
     session: Session = Depends(get_session),
 ):
     try:
-        raw_lists = await tasks_client.get_task_lists()
+        raw_lists = await tasks_client.get_task_lists(creds)
     except Exception as exc:
         logger.exception("Google Tasks fetch failed: %s", exc)
         raise ApiError(
@@ -32,7 +37,7 @@ async def list_tasks(
         ) from exc
 
     task_lists = overlay_svc.get_merged_task_lists(
-        session, raw_lists, view=view, show_completed=show_completed
+        session, user.id, raw_lists, view=view, show_completed=show_completed
     )
     return {"task_lists": task_lists}
 
@@ -47,6 +52,7 @@ async def update_overlay(
     tasklist_id: str,
     task_id: str,
     body: OverlayUpdate,
+    user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     group_id_provided = "group_id" in body.model_fields_set
@@ -54,6 +60,7 @@ async def update_overlay(
         raise ApiError(400, "no_fields", "Provide at least one of rank or group_id.")
     row = overlay_svc.upsert_overlay(
         session,
+        user.id,
         tasklist_id=tasklist_id,
         task_id=task_id,
         rank=body.rank,
@@ -91,10 +98,14 @@ async def reschedule_task(
     tasklist_id: str,
     task_id: str,
     body: RescheduleRequest,
+    user: User = Depends(get_current_user),
+    creds: Credentials = Depends(get_current_credentials),
     session: Session = Depends(get_session),
 ):
     return await writes_svc.reschedule(
         session,
+        creds,
+        user.id,
         tasklist_id=tasklist_id,
         task_id=task_id,
         due_date=body.due_date,
@@ -108,11 +119,15 @@ async def move_task(
     tasklist_id: str,
     task_id: str,
     body: MoveRequest,
+    user: User = Depends(get_current_user),
+    creds: Credentials = Depends(get_current_credentials),
     session: Session = Depends(get_session),
 ):
     fields = body.model_fields_set
     return await writes_svc.move(
         session,
+        creds,
+        user.id,
         tasklist_id=tasklist_id,
         task_id=task_id,
         target_list_id=body.target_list_id,
@@ -148,10 +163,14 @@ class ListRename(BaseModel):
 async def create_task(
     tasklist_id: str,
     body: TaskCreate,
+    user: User = Depends(get_current_user),
+    creds: Credentials = Depends(get_current_credentials),
     session: Session = Depends(get_session),
 ):
     return await writes_svc.create_task(
         session,
+        creds,
+        user.id,
         tasklist_id=tasklist_id,
         title=body.title,
         rank=body.rank,
@@ -165,6 +184,8 @@ async def update_task(
     tasklist_id: str,
     task_id: str,
     body: TaskContentUpdate,
+    user: User = Depends(get_current_user),
+    creds: Credentials = Depends(get_current_credentials),
     session: Session = Depends(get_session),
 ):
     fields = body.model_fields_set
@@ -174,6 +195,8 @@ async def update_task(
         )
     return await writes_svc.update_content(
         session,
+        creds,
+        user.id,
         tasklist_id=tasklist_id,
         task_id=task_id,
         title=body.title if "title" in fields else writes_svc._UNSET,
@@ -186,14 +209,22 @@ async def update_task(
 async def delete_task(
     tasklist_id: str,
     task_id: str,
+    user: User = Depends(get_current_user),
+    creds: Credentials = Depends(get_current_credentials),
     session: Session = Depends(get_session),
 ):
-    return await writes_svc.delete(session, tasklist_id=tasklist_id, task_id=task_id)
+    return await writes_svc.delete(
+        session, creds, user.id, tasklist_id=tasklist_id, task_id=task_id
+    )
 
 
 @router.patch("/lists/{tasklist_id}")
-async def rename_list(tasklist_id: str, body: ListRename):
-    return await writes_svc.rename_list(tasklist_id, body.title)
+async def rename_list(
+    tasklist_id: str,
+    body: ListRename,
+    creds: Credentials = Depends(get_current_credentials),
+):
+    return await writes_svc.rename_list(creds, tasklist_id, body.title)
 
 
 # ── Group CRUD ────────────────────────────────────────────────────────────────
@@ -224,11 +255,13 @@ def _group_response(grp) -> dict:
 async def create_group(
     tasklist_id: str,
     body: GroupCreate,
+    user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     try:
         grp = overlay_svc.create_group(
             session,
+            user.id,
             tasklist_id=tasklist_id,
             bucket_key=body.bucket_key,
             name=body.name,
@@ -246,12 +279,14 @@ async def update_group(
     tasklist_id: str,
     group_id: int,
     body: GroupUpdate,
+    user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     if body.name is None and body.rank is None:
         raise ApiError(400, "no_fields", "Provide at least one of name or rank.")
     grp = overlay_svc.update_group(
         session,
+        user.id,
         group_id=group_id,
         tasklist_id=tasklist_id,
         name=body.name,
@@ -266,9 +301,12 @@ async def update_group(
 async def delete_group(
     tasklist_id: str,
     group_id: int,
+    user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
-    ok = overlay_svc.delete_group(session, group_id=group_id, tasklist_id=tasklist_id)
+    ok = overlay_svc.delete_group(
+        session, user.id, group_id=group_id, tasklist_id=tasklist_id
+    )
     if not ok:
         raise ApiError(404, "not_found", "Group not found.")
     return {"ok": True}

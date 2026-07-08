@@ -17,9 +17,11 @@ import asyncio
 import logging
 import os
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
+from app.auth.models import User
 from app.db import engine
+from app.google import auth as google_auth
 from app.router import service as router_svc
 
 _log = logging.getLogger("router.scheduler")
@@ -30,14 +32,34 @@ _INTERVAL = float(os.environ.get("ROUTER_SCHEDULER_INTERVAL", "900"))
 _task: asyncio.Task | None = None
 
 
+async def _route_all_users() -> None:
+    """Per-user backstop (goal 8): route each user's UNROUTED entries with THAT
+    user's credentials. A user whose token can't load is skipped (logged), never
+    stalling the rest."""
+    with Session(engine) as session:
+        users = session.exec(select(User)).all()
+        for user in users:
+            if not user.refresh_token_encrypted:
+                continue
+            try:
+                creds = google_auth.load_credentials(session, user)
+            except Exception as exc:  # noqa: BLE001 — per-user, best-effort
+                _log.warning("scheduler: skipping user %s (creds): %s", user.id, exc)
+                continue
+            try:
+                tally = await router_svc.route_unrouted(session, user, creds)
+            except Exception:
+                _log.exception("scheduler: routing failed for user %s", user.id)
+                continue
+            if any(tally.values()):
+                _log.info("router scheduler tally (user %s): %s", user.id, tally)
+
+
 async def _loop() -> None:
     while True:
         await asyncio.sleep(_INTERVAL)
         try:
-            with Session(engine) as session:
-                tally = await router_svc.route_unrouted(session)
-            if any(tally.values()):
-                _log.info("router scheduler tally: %s", tally)
+            await _route_all_users()
         except asyncio.CancelledError:
             raise
         except Exception:  # never let a transient failure kill the loop

@@ -1633,3 +1633,258 @@ h1, h2, h3 {
     display: none;
   }
 }
+
+/* ── Goal 8: auth shell, account controls, settings modal ──────────────────── */
+
+.app-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: var(--done);
+  font-size: 15px;
+}
+
+/* Account cluster pinned to the right of the header. */
+.account-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.account-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 32px;
+  height: 32px;
+  font-size: 16px;
+  cursor: pointer;
+  color: var(--text);
+}
+.account-btn:hover {
+  background: var(--muted-bg);
+}
+
+.account-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.account-avatar--fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--muted-bg);
+  color: var(--text-h);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.account-signout {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text);
+}
+.account-signout:hover {
+  background: var(--muted-bg);
+}
+
+/* ── Sign-in page ──────────────────────────────────────────────────────────── */
+
+.signin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+.signin-card {
+  max-width: 380px;
+  width: 100%;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 40px 32px;
+  background: var(--bg);
+}
+.signin-card h1 {
+  margin: 0 0 8px;
+  font-size: 30px;
+}
+.signin-sub {
+  color: var(--done);
+  margin: 0 0 24px;
+}
+.signin-btn {
+  display: inline-block;
+  background: #1a73e8;
+  color: #fff;
+  text-decoration: none;
+  padding: 11px 22px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 15px;
+}
+.signin-btn:hover {
+  background: #1765cc;
+}
+.signin-error {
+  color: var(--error);
+  font-size: 14px;
+  margin: 0 0 18px;
+}
+.signin-fine {
+  color: var(--done);
+  font-size: 12px;
+  margin: 22px 0 0;
+  line-height: 1.5;
+}
+
+/* ── Settings modal ────────────────────────────────────────────────────────── */
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  z-index: 100;
+  overflow-y: auto;
+}
+.settings-modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 520px;
+  padding: 24px 28px 28px;
+}
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.settings-head h2 {
+  margin: 0;
+  font-size: 20px;
+}
+.settings-close {
+  background: none;
+  border: none;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--done);
+}
+.settings-section {
+  border-top: 1px solid var(--border);
+  padding-top: 18px;
+  margin-top: 18px;
+}
+.settings-section h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+.settings-hint {
+  color: var(--done);
+  font-size: 13px;
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+.settings-error {
+  color: var(--error);
+  font-size: 13px;
+  margin: 8px 0;
+}
+.settings-cal-list,
+.settings-allow-list,
+.settings-links {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+.settings-cal-list li label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 14px;
+  cursor: pointer;
+}
+.settings-cal-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.settings-tag {
+  font-size: 11px;
+  color: var(--done);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.settings-add-row {
+  display: flex;
+  gap: 8px;
+}
+.settings-add-row input {
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+.settings-add-row button,
+.settings-save {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--muted-bg);
+  color: var(--text-h);
+  cursor: pointer;
+  font-size: 13px;
+}
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.settings-saved {
+  color: #2e7d32;
+  font-size: 13px;
+}
+.settings-links a {
+  color: #1a73e8;
+  font-size: 14px;
+}
+.settings-allow-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  padding: 5px 0;
+}
+.settings-allow-list button {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--error);
+}

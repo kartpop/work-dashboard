@@ -71,17 +71,22 @@ def _merge_task(task: dict, overlay: TaskOverlay | None) -> dict:
 
 def get_merged_task_lists(
     session: Session,
+    user_id: int,
     raw_lists: list[dict],
     view: Literal["grouped", "flat"] = "grouped",
     show_completed: bool = False,
 ) -> list[dict]:
-    """Left-join overlay rows onto raw Google Tasks, then sort/group."""
+    """Left-join THIS user's overlay rows onto raw Google Tasks, then sort/group."""
     overlays: dict[tuple[str, str], TaskOverlay] = {
         (row.tasklist_id, row.task_id): row
-        for row in session.exec(select(TaskOverlay)).all()
+        for row in session.exec(
+            select(TaskOverlay).where(TaskOverlay.user_id == user_id)
+        ).all()
     }
     groups_by_list: dict[str, list[TaskGroup]] = {}
-    for grp in session.exec(select(TaskGroup)).all():
+    for grp in session.exec(
+        select(TaskGroup).where(TaskGroup.user_id == user_id)
+    ).all():
         groups_by_list.setdefault(grp.tasklist_id, []).append(grp)
 
     result = []
@@ -226,6 +231,7 @@ def _build_bucket_items(
 
 def create_group(
     session: Session,
+    user_id: int,
     tasklist_id: str,
     bucket_key: str,
     name: str,
@@ -233,6 +239,7 @@ def create_group(
 ) -> TaskGroup:
     now = datetime.now(timezone.utc)
     grp = TaskGroup(
+        user_id=user_id,
         tasklist_id=tasklist_id,
         bucket_key=bucket_key,
         name=name,
@@ -250,21 +257,24 @@ def create_group(
     return grp
 
 
-def get_group(session: Session, group_id: int, tasklist_id: str) -> TaskGroup | None:
+def get_group(
+    session: Session, user_id: int, group_id: int, tasklist_id: str
+) -> TaskGroup | None:
     grp = session.get(TaskGroup, group_id)
-    if grp is None or grp.tasklist_id != tasklist_id:
+    if grp is None or grp.user_id != user_id or grp.tasklist_id != tasklist_id:
         return None
     return grp
 
 
 def update_group(
     session: Session,
+    user_id: int,
     group_id: int,
     tasklist_id: str,
     name: str | None,
     rank: float | None,
 ) -> TaskGroup | None:
-    grp = get_group(session, group_id, tasklist_id)
+    grp = get_group(session, user_id, group_id, tasklist_id)
     if grp is None:
         return None
     now = datetime.now(timezone.utc)
@@ -278,8 +288,10 @@ def update_group(
     return grp
 
 
-def delete_group(session: Session, group_id: int, tasklist_id: str) -> bool:
-    grp = get_group(session, group_id, tasklist_id)
+def delete_group(
+    session: Session, user_id: int, group_id: int, tasklist_id: str
+) -> bool:
+    grp = get_group(session, user_id, group_id, tasklist_id)
     if grp is None:
         return False
     session.delete(grp)
@@ -292,16 +304,18 @@ def delete_group(session: Session, group_id: int, tasklist_id: str) -> bool:
 
 def upsert_overlay(
     session: Session,
+    user_id: int,
     tasklist_id: str,
     task_id: str,
     rank: float | None = None,
     group_id: Any = _UNSET,
 ) -> TaskOverlay:
     """Upsert rank and/or group_id. Pass group_id=None to explicitly ungroup."""
-    row = session.get(TaskOverlay, (tasklist_id, task_id))
+    row = session.get(TaskOverlay, (user_id, tasklist_id, task_id))
     now = datetime.now(timezone.utc)
     if row is None:
         row = TaskOverlay(
+            user_id=user_id,
             tasklist_id=tasklist_id,
             task_id=task_id,
             rank=rank,

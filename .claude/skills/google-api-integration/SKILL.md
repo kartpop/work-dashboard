@@ -8,18 +8,29 @@ description: Conventions for adding a new read-only Google API client module und
 Patterns that repeated across `app/google/tasks.py` and `app/google/calendar.py`. Follow them
 when adding a new service module (e.g. `drive.py`).
 
-## Credentials
+## Credentials (per-user, goal 8)
 
-Always get credentials via `app.google.auth.load_credentials()`. It loads the persisted token
-from `backend/.google-tokens/token.json`, refreshes it if expired, and raises `RuntimeError`
-with a clear message if no token exists yet.
+Credentials are **per-user and passed explicitly** — there is no global token file anymore. Every
+`app/google/*` function takes a live `creds: Credentials` as its **first argument**
+(`_service(creds)` → `build(..., credentials=creds)`). Handlers obtain it from
+`creds: Credentials = Depends(get_current_credentials)` (`app/auth/deps.py`) and thread it through
+the service into the client; the scheduler backstop loads each user's creds per tick. So a new
+service module's functions look like `async def get_thing(creds, ...)`, and its callers already hold
+`creds`.
 
-Never run the interactive consent flow (`InstalledAppFlow.run_local_server`) from request-handling
-code — it blocks on a browser prompt, which a server process must not do. That flow lives only in
-`auth.authorize()`, run once via `uv run python -m app.google.auth`.
+`app.google.auth.load_credentials(session, user)` builds the live credentials from the user's
+Fernet-encrypted refresh token (from the `user` row), refreshes to mint an access token, re-persists
+a rotated refresh token, and runs the **per-token** scope assertion (a grant broader than
+`auth.ALLOWED_SCOPES` raises `ScopeError`). Sign-in is a **web OAuth flow** (`build_flow` /
+`authorization_url` / `exchange_code` / `verify_id_token`) — never `InstalledAppFlow`, never a
+consent flow from request-handling code.
 
-If a new service needs a scope `load_credentials` doesn't request yet, add it to `auth.SCOPES`
-and re-run the authorize step to mint a token covering the new scope.
+If a new service needs a scope not in `auth.SCOPES`, add it there (and to the consent screen) — but
+**never** `documents`/`drive` (ADR: drive-access-scoping; `drive.file` only). Existing users re-grant
+by signing out and back in.
+
+For a calendar-style "list what the account can see" fetch, see `calendar.get_calendar_list`
+(`calendarList.list`, within `calendar.readonly`) — the settings toggle's source.
 
 ## Sync client, async boundary
 
