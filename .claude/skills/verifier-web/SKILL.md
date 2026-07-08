@@ -281,3 +281,14 @@ lists only. They assert *state-machine* properties, not just final state:
 
 Kill background processes after verification. The overlay DB (`backend/overlay.db`) is
 gitignored and safe to leave in place — it accumulates rank/group data from test interactions.
+
+## Goal 8: auth-gated endpoints + isolation
+
+Every non-`/auth` endpoint now requires a **session cookie** — a bare `curl` gets 401. To exercise
+an authenticated endpoint, either drive the real Google Sign-In flow in a browser (blocked: no
+browser in the verifier sandbox) or, for endpoint tests, use the pytest suite's dependency-override
+pattern (`app.dependency_overrides[get_current_user]`) — see `backend/tests/conftest.py`. The
+**two-user isolation** headline check (a second user can't read/mutate the first's rows by id) is
+covered by pytest, not the web verifier. Verification against a **deployed** instance is a distinct
+mode: it can reach only public/authed surfaces with a real session and can't inspect the DB —
+prefer the local pytest gate for isolation/tenancy assertions.

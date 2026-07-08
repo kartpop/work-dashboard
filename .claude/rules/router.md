@@ -62,3 +62,15 @@ under `backend/app/router/`.
 
 The router runs on a **small/cheap model** (`config.ROUTER_MODEL`, default `claude-haiku-4-5`) — this
 is classification + light extraction, not reasoning. That is a product decision, not a compromise.
+
+## Goal 8: per-user routing
+
+Routing is per-user. `route_entry(session, user, creds, entry)` /
+`route_unrouted(session, user, creds)` / `confirm_review(session, user, creds, item_id, ...)` take
+the current `User` + their live `creds`; every Google call uses those creds and every
+`scratch_entry` / `review_item` is written/read with `user_id`. The notes Doc is the **user's own**,
+resolved via `app.settings.service.ensure_notes_target(session, creds, user_id)` (app-created folder +
+Doc on first need) — the `NOTES_DOC_ID`/`NOTES_FOLDER_ID` env vars and the "kept-local when unset"
+degrade are gone; a note always has a home. The scheduler backstop iterates users and loads each
+user's creds (`app.google.auth.load_credentials`) per tick. The insert-only write set
+`{create_task, reschedule, append_note}` and the AST test are unchanged.

@@ -32,6 +32,7 @@ class ScratchEntry(SQLModel, table=True):
     __tablename__ = "scratch_entry"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)  # row-scoping (goal 8)
     text: str = Field()
     routing_state: str = Field(default=UNROUTED, max_length=20, index=True)
     # Raw classification JSON (destination/confidence/fields) for display + debug.
@@ -48,6 +49,7 @@ class ReviewItem(SQLModel, table=True):
     __tablename__ = "review_item"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)  # row-scoping (goal 8)
     entry_id: int = Field(foreign_key="scratch_entry.id", index=True)
     destination: str = Field(max_length=20)  # proposed: task | note | event | unknown
     fields_json: str = Field(default="{}")  # extracted fields the human can edit

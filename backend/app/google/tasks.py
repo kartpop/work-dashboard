@@ -8,20 +8,22 @@ never via MCP/LLM).
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from app.google._paging import list_all
-from app.google.auth import load_credentials
+
+if TYPE_CHECKING:
+    from google.oauth2.credentials import Credentials
 
 # Sentinel so write wrappers can tell "field omitted" from "explicitly cleared".
 _UNSET: Any = object()
 
 
-def _tasks_service():
-    return build("tasks", "v1", credentials=load_credentials(), cache_discovery=False)
+def _tasks_service(creds: "Credentials"):
+    return build("tasks", "v1", credentials=creds, cache_discovery=False)
 
 
 def _reshape_task(task: dict) -> dict:
@@ -38,8 +40,8 @@ def _reshape_task(task: dict) -> dict:
     }
 
 
-def _fetch_task_lists() -> list[dict]:
-    service = _tasks_service()
+def _fetch_task_lists(creds: "Credentials") -> list[dict]:
+    service = _tasks_service(creds)
 
     task_lists = []
     for task_list in list_all(service.tasklists()):
@@ -59,16 +61,16 @@ def _fetch_task_lists() -> list[dict]:
     return task_lists
 
 
-async def get_task_lists() -> list[dict]:
+async def get_task_lists(creds: "Credentials") -> list[dict]:
     """Return every task list in the account, each with its tasks."""
-    return await asyncio.to_thread(_fetch_task_lists)
+    return await asyncio.to_thread(_fetch_task_lists, creds)
 
 
 # ── Read helper used by the writes service ────────────────────────────────────
 
 
-def _get_task(tasklist_id: str, task_id: str) -> dict | None:
-    service = _tasks_service()
+def _get_task(creds: "Credentials", tasklist_id: str, task_id: str) -> dict | None:
+    service = _tasks_service(creds)
     try:
         task = service.tasks().get(tasklist=tasklist_id, task=task_id).execute()
     except HttpError as exc:
@@ -81,16 +83,18 @@ def _get_task(tasklist_id: str, task_id: str) -> dict | None:
     return _reshape_task(task)
 
 
-async def get_task(tasklist_id: str, task_id: str) -> dict | None:
+async def get_task(creds: "Credentials", tasklist_id: str, task_id: str) -> dict | None:
     """Fetch a single task; return None if it does not exist (404)."""
-    return await asyncio.to_thread(_get_task, tasklist_id, task_id)
+    return await asyncio.to_thread(_get_task, creds, tasklist_id, task_id)
 
 
 # ── Thin write wrappers (one Google call each; no orchestration) ──────────────
 
 
-def _update_due_date(tasklist_id: str, task_id: str, due: str | None) -> None:
-    service = _tasks_service()
+def _update_due_date(
+    creds: "Credentials", tasklist_id: str, task_id: str, due: str | None
+) -> None:
+    service = _tasks_service(creds)
     if due is not None:
         service.tasks().patch(
             tasklist=tasklist_id, task=task_id, body={"due": due}
@@ -103,43 +107,46 @@ def _update_due_date(tasklist_id: str, task_id: str, due: str | None) -> None:
     service.tasks().update(tasklist=tasklist_id, task=task_id, body=task).execute()
 
 
-async def update_due_date(tasklist_id: str, task_id: str, due: str | None) -> None:
+async def update_due_date(
+    creds: "Credentials", tasklist_id: str, task_id: str, due: str | None
+) -> None:
     """Set (patch) or clear (get+update) the Google due date for a task."""
-    await asyncio.to_thread(_update_due_date, tasklist_id, task_id, due)
+    await asyncio.to_thread(_update_due_date, creds, tasklist_id, task_id, due)
 
 
-def _insert_task(tasklist_id: str, body: dict) -> dict:
-    service = _tasks_service()
+def _insert_task(creds: "Credentials", tasklist_id: str, body: dict) -> dict:
+    service = _tasks_service(creds)
     task = service.tasks().insert(tasklist=tasklist_id, body=body).execute()
     return _reshape_task(task)
 
 
-async def insert_task(tasklist_id: str, body: dict) -> dict:
+async def insert_task(creds: "Credentials", tasklist_id: str, body: dict) -> dict:
     """Insert a new task into a list and return its reshaped representation."""
-    return await asyncio.to_thread(_insert_task, tasklist_id, body)
+    return await asyncio.to_thread(_insert_task, creds, tasklist_id, body)
 
 
-def _delete_task(tasklist_id: str, task_id: str) -> None:
-    service = _tasks_service()
+def _delete_task(creds: "Credentials", tasklist_id: str, task_id: str) -> None:
+    service = _tasks_service(creds)
     service.tasks().delete(tasklist=tasklist_id, task=task_id).execute()
 
 
-async def delete_task(tasklist_id: str, task_id: str) -> None:
+async def delete_task(creds: "Credentials", tasklist_id: str, task_id: str) -> None:
     # Exactly two sanctioned callers (see .claude/rules/writes.md):
     #   1. app.writes.service.move — after a confirmed successful insert.
     #   2. app.writes.service.delete — the user delete endpoint, after the
     #      frontend's undo window has closed.
-    await asyncio.to_thread(_delete_task, tasklist_id, task_id)
+    await asyncio.to_thread(_delete_task, creds, tasklist_id, task_id)
 
 
 def _update_task_content(
+    creds: "Credentials",
     tasklist_id: str,
     task_id: str,
     title: Any = _UNSET,
     notes: Any = _UNSET,
     status: Any = _UNSET,
 ) -> dict:
-    service = _tasks_service()
+    service = _tasks_service(creds)
     body: dict = {}
     if title is not _UNSET:
         body["title"] = title
@@ -159,6 +166,7 @@ def _update_task_content(
 
 
 async def update_task_content(
+    creds: "Credentials",
     tasklist_id: str,
     task_id: str,
     title: Any = _UNSET,
@@ -168,21 +176,21 @@ async def update_task_content(
     """Patch a task's content fields (title / notes / status). Only the fields
     explicitly provided are sent; completion rides the `status` field."""
     return await asyncio.to_thread(
-        _update_task_content, tasklist_id, task_id, title, notes, status
+        _update_task_content, creds, tasklist_id, task_id, title, notes, status
     )
 
 
 # ── Tasklist (list-level) write — the only write to the tasklists resource ─────
 
 
-def _update_tasklist(tasklist_id: str, title: str) -> dict:
-    service = _tasks_service()
+def _update_tasklist(creds: "Credentials", tasklist_id: str, title: str) -> dict:
+    service = _tasks_service(creds)
     tl = (
         service.tasklists().patch(tasklist=tasklist_id, body={"title": title}).execute()
     )
     return {"id": tl["id"], "title": tl.get("title", "")}
 
 
-async def update_tasklist(tasklist_id: str, title: str) -> dict:
+async def update_tasklist(creds: "Credentials", tasklist_id: str, title: str) -> dict:
     """Rename a task list (the one write to the tasklists resource, goal 4a)."""
-    return await asyncio.to_thread(_update_tasklist, tasklist_id, title)
+    return await asyncio.to_thread(_update_tasklist, creds, tasklist_id, title)

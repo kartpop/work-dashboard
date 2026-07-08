@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import zoneinfo
 from datetime import date as date_cls
 from datetime import datetime, time, timedelta
+from typing import TYPE_CHECKING
 
 from googleapiclient.discovery import build
 
-from app.google.auth import load_credentials
+if TYPE_CHECKING:
+    from google.oauth2.credentials import Credentials
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,6 @@ def _ist_day_bounds(day: date_cls) -> tuple[str, str]:
     start = datetime.combine(day, time.min, tzinfo=_IST)
     end = start + timedelta(days=1)
     return start.isoformat(), end.isoformat()
-
-
-def _extra_calendar_ids() -> list[str]:
-    """Calendar IDs shared into the personal account, from `EXTRA_CALENDAR_IDS`
-    (comma-separated). Config-only — never from LLM output or request payloads.
-    Unset/empty → `[]` (primary-only)."""
-    raw = os.environ.get("EXTRA_CALENDAR_IDS", "")
-    return [cid.strip() for cid in raw.split(",") if cid.strip()]
 
 
 def _extract_meet_link(event: dict) -> str | None:
@@ -135,19 +128,20 @@ def _fetch_calendar_day(
     )
 
 
-def _fetch_day_events(day: date_cls) -> list[dict]:
-    service = build(
-        "calendar", "v3", credentials=load_credentials(), cache_discovery=False
-    )
+def _fetch_day_events(
+    creds: "Credentials", day: date_cls, extra_calendar_ids: list[str]
+) -> list[dict]:
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
     time_min, time_max = _ist_day_bounds(day)
 
     # Primary first (so its copy wins dedupe); a primary failure is a real error.
     raw_lists = [_fetch_calendar_day(service, "primary", time_min, time_max)]
 
-    # Shared calendars are their own entities — not visible under `primary`. Each
-    # extra is best-effort: a revoked share / bad id logs a warning; the strip
-    # still renders from the rest.
-    for calendar_id in _extra_calendar_ids():
+    # Shared / toggled-on calendars are their own entities — not visible under
+    # `primary`. Each extra is best-effort: a revoked share / bad id logs a warning;
+    # the strip still renders from the rest. Ids come from the user's settings
+    # (goal 8 — replaces the EXTRA_CALENDAR_IDS env var).
+    for calendar_id in extra_calendar_ids:
         try:
             raw_lists.append(
                 _fetch_calendar_day(service, calendar_id, time_min, time_max)
@@ -158,7 +152,45 @@ def _fetch_day_events(day: date_cls) -> list[dict]:
     return [_reshape_event(event) for event in _merge_events(raw_lists)]
 
 
-async def get_day_events(day: date_cls | None = None) -> list[dict]:
-    """Return one IST day's events (default today) merged across `primary` + every
-    `EXTRA_CALENDAR_IDS`, deduped by `iCalUID`, sorted by start."""
-    return await asyncio.to_thread(_fetch_day_events, day or today_ist())
+async def get_day_events(
+    creds: "Credentials",
+    extra_calendar_ids: list[str] | None = None,
+    day: date_cls | None = None,
+) -> list[dict]:
+    """Return one IST day's events (default today) merged across `primary` + the
+    user's toggled-on `extra_calendar_ids`, deduped by `iCalUID`, sorted by start."""
+    return await asyncio.to_thread(
+        _fetch_day_events, creds, day or today_ist(), extra_calendar_ids or []
+    )
+
+
+# ── Calendar list (settings toggle source, goal 8) ────────────────────────────
+
+
+def _reshape_calendar(entry: dict) -> dict:
+    """Map a raw calendarList entry to the small shape the settings toggle needs."""
+    return {
+        "id": entry["id"],
+        "summary": entry.get("summaryOverride") or entry.get("summary") or entry["id"],
+        "primary": bool(entry.get("primary")),
+        "background_color": entry.get("backgroundColor"),
+    }
+
+
+def _fetch_calendar_list(creds: "Credentials") -> list[dict]:
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    entries: list[dict] = []
+    page_token = None
+    while True:
+        resp = service.calendarList().list(pageToken=page_token).execute()
+        entries.extend(resp.get("items", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return [_reshape_calendar(e) for e in entries]
+
+
+async def get_calendar_list(creds: "Credentials") -> list[dict]:
+    """List the calendars this account can see (`calendarList.list`) — the source
+    for the settings toggle (within `calendar.readonly`, no scope change)."""
+    return await asyncio.to_thread(_fetch_calendar_list, creds)

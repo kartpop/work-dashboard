@@ -11,9 +11,12 @@ from __future__ import annotations
 import logging
 import zoneinfo
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlmodel import Session
+
+if TYPE_CHECKING:
+    from google.oauth2.credentials import Credentials
 
 from app.errors import ApiError
 from app.google import docs as docs_client
@@ -34,6 +37,8 @@ _ancestry_ok: set[str] = set()
 
 async def reschedule(
     session: Session,
+    creds: "Credentials",
+    user_id: int,
     tasklist_id: str,
     task_id: str,
     due_date: str | None,
@@ -47,14 +52,14 @@ async def reschedule(
     destination bucket (422 otherwise); it is always set explicitly on the
     overlay (None ungroups).
     """
-    current = await tasks_client.get_task(tasklist_id, task_id)
+    current = await tasks_client.get_task(creds, tasklist_id, task_id)
     if current is None:
         raise ApiError(404, "task_not_found", "Task not found.")
 
     target_bucket = due_date or _NO_DATE
 
     if group_id is not None:
-        grp = overlay_svc.get_group(session, group_id, tasklist_id)
+        grp = overlay_svc.get_group(session, user_id, group_id, tasklist_id)
         if grp is None or grp.bucket_key != target_bucket:
             raise ApiError(
                 422,
@@ -66,7 +71,7 @@ async def reschedule(
     if target_bucket != current_bucket:
         new_due = f"{due_date}T00:00:00.000Z" if due_date is not None else None
         try:
-            await tasks_client.update_due_date(tasklist_id, task_id, new_due)
+            await tasks_client.update_due_date(creds, tasklist_id, task_id, new_due)
         except Exception as exc:
             raise ApiError(
                 502, "google_write_failed", "Could not update the task due date."
@@ -77,7 +82,7 @@ async def reschedule(
         due_out = current.get("due")
 
     row = overlay_svc.upsert_overlay(
-        session, tasklist_id, task_id, rank=rank, group_id=group_id
+        session, user_id, tasklist_id, task_id, rank=rank, group_id=group_id
     )
 
     return {
@@ -91,6 +96,8 @@ async def reschedule(
 
 async def move(
     session: Session,
+    creds: "Credentials",
+    user_id: int,
     tasklist_id: str,
     task_id: str,
     target_list_id: str,
@@ -115,7 +122,7 @@ async def move(
     if target_list_id == tasklist_id:
         raise ApiError(400, "same_list", "Task is already in that list.")
 
-    src = await tasks_client.get_task(tasklist_id, task_id)
+    src = await tasks_client.get_task(creds, tasklist_id, task_id)
     if src is None:
         raise ApiError(404, "task_not_found", "Task not found.")
 
@@ -128,7 +135,7 @@ async def move(
         target_bucket = due_date or _NO_DATE
 
     if group_id is not None:
-        grp = overlay_svc.get_group(session, group_id, target_list_id)
+        grp = overlay_svc.get_group(session, user_id, group_id, target_list_id)
         if grp is None or grp.bucket_key != target_bucket:
             raise ApiError(
                 422,
@@ -151,7 +158,7 @@ async def move(
 
     # Insert first — nothing is deleted yet, so a failure leaves no partial state.
     try:
-        new = await tasks_client.insert_task(target_list_id, body)
+        new = await tasks_client.insert_task(creds, target_list_id, body)
     except Exception as exc:
         raise ApiError(
             502, "google_insert_failed", "Could not copy the task to the target list."
@@ -162,7 +169,7 @@ async def move(
     # Delete the original only after the insert succeeded. If THIS fails, the task
     # now exists in both lists — surface the duplicate rather than retry-delete.
     try:
-        await tasks_client.delete_task(tasklist_id, task_id)
+        await tasks_client.delete_task(creds, tasklist_id, task_id)
     except Exception as exc:
         raise ApiError(
             502,
@@ -173,9 +180,9 @@ async def move(
 
     # Migrate the overlay row to the new key, then drop the old one.
     row = overlay_svc.upsert_overlay(
-        session, target_list_id, new_id, rank=rank, group_id=group_id
+        session, user_id, target_list_id, new_id, rank=rank, group_id=group_id
     )
-    old = session.get(TaskOverlay, (tasklist_id, task_id))
+    old = session.get(TaskOverlay, (user_id, tasklist_id, task_id))
     if old is not None:
         session.delete(old)
         session.commit()
@@ -193,6 +200,8 @@ async def move(
 
 async def create_task(
     session: Session,
+    creds: "Credentials",
+    user_id: int,
     tasklist_id: str,
     title: str,
     rank: float | None,
@@ -214,20 +223,22 @@ async def create_task(
         body["due"] = f"{due_date}T00:00:00.000Z"
 
     try:
-        new = await tasks_client.insert_task(tasklist_id, body)
+        new = await tasks_client.insert_task(creds, tasklist_id, body)
     except Exception as exc:
         raise ApiError(
             502, "google_insert_failed", "Could not create the task."
         ) from exc
 
     row = overlay_svc.upsert_overlay(
-        session, tasklist_id, new["id"], rank=rank, group_id=None
+        session, user_id, tasklist_id, new["id"], rank=rank, group_id=None
     )
     return {**new, "type": "task", "rank": row.rank, "group_id": row.group_id}
 
 
 async def update_content(
     session: Session,
+    creds: "Credentials",
+    user_id: int,
     tasklist_id: str,
     task_id: str,
     title: Any = _UNSET,
@@ -243,7 +254,7 @@ async def update_content(
     if title is not _UNSET and not str(title).strip():
         raise ApiError(400, "empty_title", "Task title must not be empty.")
 
-    current = await tasks_client.get_task(tasklist_id, task_id)
+    current = await tasks_client.get_task(creds, tasklist_id, task_id)
     if current is None:
         raise ApiError(404, "task_not_found", "Task not found.")
 
@@ -259,13 +270,15 @@ async def update_content(
         fields["status"] = status
 
     try:
-        updated = await tasks_client.update_task_content(tasklist_id, task_id, **fields)
+        updated = await tasks_client.update_task_content(
+            creds, tasklist_id, task_id, **fields
+        )
     except Exception as exc:
         raise ApiError(
             502, "google_write_failed", "Could not update the task."
         ) from exc
 
-    overlay = session.get(TaskOverlay, (tasklist_id, task_id))
+    overlay = session.get(TaskOverlay, (user_id, tasklist_id, task_id))
     return {
         **updated,
         "type": "task",
@@ -274,37 +287,43 @@ async def update_content(
     }
 
 
-async def delete(session: Session, tasklist_id: str, task_id: str) -> dict:
+async def delete(
+    session: Session,
+    creds: "Credentials",
+    user_id: int,
+    tasklist_id: str,
+    task_id: str,
+) -> dict:
     """Delete a task from Google and drop its overlay row.
 
     Immediate on the backend — the ~5s deferral + undo is entirely a frontend
     concern (an undo means this endpoint is never called → zero Google writes).
     This is the second sanctioned `delete_task` caller (the first is `move`).
     """
-    current = await tasks_client.get_task(tasklist_id, task_id)
+    current = await tasks_client.get_task(creds, tasklist_id, task_id)
     if current is None:
         raise ApiError(404, "task_not_found", "Task not found.")
 
     try:
-        await tasks_client.delete_task(tasklist_id, task_id)
+        await tasks_client.delete_task(creds, tasklist_id, task_id)
     except Exception as exc:
         raise ApiError(
             502, "google_delete_failed", "Could not delete the task."
         ) from exc
 
-    row = session.get(TaskOverlay, (tasklist_id, task_id))
+    row = session.get(TaskOverlay, (user_id, tasklist_id, task_id))
     if row is not None:
         session.delete(row)
         session.commit()
     return {"tasklist_id": tasklist_id, "task_id": task_id, "deleted": True}
 
 
-async def rename_list(tasklist_id: str, title: str) -> dict:
+async def rename_list(creds: "Credentials", tasklist_id: str, title: str) -> dict:
     """Rename a task list (write to the tasklists resource, not a task)."""
     if not title.strip():
         raise ApiError(400, "empty_title", "List title must not be empty.")
     try:
-        return await tasks_client.update_tasklist(tasklist_id, title)
+        return await tasks_client.update_tasklist(creds, tasklist_id, title)
     except Exception as exc:
         raise ApiError(
             502, "google_write_failed", "Could not rename the list."
@@ -330,7 +349,9 @@ def format_note_heading(dt: datetime) -> str:
     return f"{dt.day}-{dt.strftime('%B')}-{dt.year}, {hour}:{dt.minute:02d} {ampm} IST"
 
 
-async def _assert_in_notes_folder(doc_id: str, folder_id: str | None) -> None:
+async def _assert_in_notes_folder(
+    creds: "Credentials", doc_id: str, folder_id: str | None
+) -> None:
     """Folder-ancestry gate: verify `doc_id`'s parent chain reaches `folder_id`.
 
     Fail-closed — a missing folder id, an unreachable doc, or an error anywhere in
@@ -338,11 +359,13 @@ async def _assert_in_notes_folder(doc_id: str, folder_id: str | None) -> None:
     per doc id after the first success (a doc can't leave its folder mid-process).
     """
     if not folder_id:
-        raise ApiError(500, "notes_folder_unset", "NOTES_FOLDER_ID is not configured.")
+        raise ApiError(
+            500, "notes_folder_unset", "The user's notes folder is not configured."
+        )
     if doc_id in _ancestry_ok:
         return
     try:
-        reached = await _walk_to_folder(doc_id, folder_id)
+        reached = await _walk_to_folder(creds, doc_id, folder_id)
     except Exception as exc:
         raise ApiError(
             502,
@@ -353,12 +376,14 @@ async def _assert_in_notes_folder(doc_id: str, folder_id: str | None) -> None:
         raise ApiError(
             422,
             "notes_doc_outside_folder",
-            "The configured NOTES_DOC_ID is not inside NOTES_FOLDER_ID.",
+            "The configured notes Doc is not inside the user's notes folder.",
         )
     _ancestry_ok.add(doc_id)
 
 
-async def _walk_to_folder(file_id: str, folder_id: str, max_depth: int = 10) -> bool:
+async def _walk_to_folder(
+    creds: "Credentials", file_id: str, folder_id: str, max_depth: int = 10
+) -> bool:
     """Walk up `file_id`'s parents (bounded) looking for `folder_id`.
 
     The common case — a bootstrap-created doc sitting directly in the folder —
@@ -373,7 +398,7 @@ async def _walk_to_folder(file_id: str, folder_id: str, max_depth: int = 10) -> 
             if fid in seen:
                 continue
             seen.add(fid)
-            parents.extend(await docs_client.get_parents(fid))
+            parents.extend(await docs_client.get_parents(creds, fid))
         if folder_id in parents:
             return True
         if not parents:
@@ -383,6 +408,7 @@ async def _walk_to_folder(file_id: str, folder_id: str, max_depth: int = 10) -> 
 
 
 async def append_note(
+    creds: "Credentials",
     doc_id: str,
     folder_id: str | None,
     body_text: str,
@@ -398,10 +424,10 @@ async def append_note(
     between the timestamp and the verbatim `body_text`. The raw text stays verbatim;
     an empty/missing summary degrades to the goal-7 shape.
     """
-    await _assert_in_notes_folder(doc_id, folder_id)
+    await _assert_in_notes_folder(creds, doc_id, folder_id)
     heading = format_note_heading(datetime.now(_IST))
     try:
-        await docs_client.insert_note(doc_id, heading, body_text, summary)
+        await docs_client.insert_note(creds, doc_id, heading, body_text, summary)
     except ApiError:
         raise
     except Exception as exc:

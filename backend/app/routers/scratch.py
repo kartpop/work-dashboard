@@ -1,8 +1,10 @@
-"""Scratchpad capture + review-queue endpoints (goal 5).
+"""Scratchpad capture + review-queue endpoints (goal 5; per-user from goal 8).
 
 Thin router: appends raw captures, triggers routing (manual "route now"), and
 disposes review items. All orchestration lives in `app.router.service`; the only
-runtime LLM (the classifier) is reached through that service, never here.
+runtime LLM (the classifier) is reached through that service, never here. Every
+row is scoped to `current_user` (goal 8) — no capture, entry, or review item is
+readable or mutable across tenants.
 """
 
 from __future__ import annotations
@@ -11,9 +13,12 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends
+from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 from sqlmodel import Session, desc, select
 
+from app.auth.deps import get_current_credentials, get_current_user
+from app.auth.models import User
 from app.db import get_session
 from app.errors import ApiError
 from app.router import service as router_svc
@@ -40,7 +45,12 @@ class CaptureRequest(BaseModel):
 
 
 @router.post("/scratch", status_code=201)
-async def capture(body: CaptureRequest, session: Session = Depends(get_session)):
+async def capture(
+    body: CaptureRequest,
+    user: User = Depends(get_current_user),
+    creds: Credentials = Depends(get_current_credentials),
+    session: Session = Depends(get_session),
+):
     """Append a raw capture, then route it inline (goal 7c instant routing).
 
     Capture is persisted FIRST (append-only; never edits or deletes prior entries),
@@ -52,13 +62,13 @@ async def capture(body: CaptureRequest, session: Session = Depends(get_session))
     text = body.text.strip()
     if not text:
         raise ApiError(400, "empty_capture", "Capture text must not be empty.")
-    entry = ScratchEntry(text=text)
+    entry = ScratchEntry(user_id=user.id, text=text)
     session.add(entry)
     session.commit()
     session.refresh(entry)
 
     try:
-        await router_svc.route_entry(session, entry)
+        await router_svc.route_entry(session, user, creds, entry)
     except ApiError:
         # A Google/Docs write failed — the entry is already persisted and left
         # UNROUTED (re-routable). Capture is never lost; the backstop retries.
@@ -68,19 +78,30 @@ async def capture(body: CaptureRequest, session: Session = Depends(get_session))
 
 
 @router.get("/scratch")
-async def list_entries(limit: int = 100, session: Session = Depends(get_session)):
-    """List recent captures, newest first, with their routing state."""
+async def list_entries(
+    limit: int = 100,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """List THIS user's recent captures, newest first, with their routing state."""
     entries = session.exec(
-        select(ScratchEntry).order_by(desc(ScratchEntry.id)).limit(limit)
+        select(ScratchEntry)
+        .where(ScratchEntry.user_id == user.id)
+        .order_by(desc(ScratchEntry.id))
+        .limit(limit)
     ).all()
     return {"entries": [_entry_out(e) for e in entries]}
 
 
 @router.post("/scratch/route-now")
-async def route_now(session: Session = Depends(get_session)):
-    """Route every unrouted entry now (the manual trigger; same code path as the
-    scheduled job). Idempotent: already-routed entries are skipped."""
-    tally = await router_svc.route_unrouted(session)
+async def route_now(
+    user: User = Depends(get_current_user),
+    creds: Credentials = Depends(get_current_credentials),
+    session: Session = Depends(get_session),
+):
+    """Route every unrouted entry for this user now (the manual trigger; same code
+    path as the scheduled job). Idempotent: already-routed entries are skipped."""
+    tally = await router_svc.route_unrouted(session, user, creds)
     return {"tally": tally}
 
 
@@ -101,10 +122,16 @@ def _review_out(item: ReviewItem, entry: ScratchEntry | None) -> dict:
 
 
 @router.get("/review")
-async def list_review(session: Session = Depends(get_session)):
-    """List pending review items with their source-entry text."""
+async def list_review(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """List this user's pending review items with their source-entry text."""
     items = session.exec(
-        select(ReviewItem).where(ReviewItem.status == PENDING).order_by(ReviewItem.id)
+        select(ReviewItem)
+        .where(ReviewItem.user_id == user.id)
+        .where(ReviewItem.status == PENDING)
+        .order_by(ReviewItem.id)
     ).all()
     out = []
     for item in items:
@@ -124,17 +151,23 @@ class ConfirmRequest(BaseModel):
 async def confirm(
     item_id: int,
     body: ConfirmRequest | None = None,
+    user: User = Depends(get_current_user),
+    creds: Credentials = Depends(get_current_credentials),
     session: Session = Depends(get_session),
 ):
     """Confirm a review item — fires exactly one `create_task` for a `task` item;
     keeps a `note`; acknowledges an `event`/`unknown` with NO write."""
     body = body or ConfirmRequest()
     return await router_svc.confirm_review(
-        session, item_id, destination=body.destination, fields=body.fields
+        session, user, creds, item_id, destination=body.destination, fields=body.fields
     )
 
 
 @router.post("/review/{item_id}/dismiss")
-async def dismiss(item_id: int, session: Session = Depends(get_session)):
+async def dismiss(
+    item_id: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
     """Dismiss a review item — writes nothing; the source entry is resolved."""
-    return await router_svc.dismiss_review(session, item_id)
+    return await router_svc.dismiss_review(session, user, item_id)

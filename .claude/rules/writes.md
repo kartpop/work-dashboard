@@ -123,3 +123,28 @@ to boot if the token carries any scope outside `ALLOWED_SCOPES` — a token *mis
 fine (notes degrade to kept-local), a token *broader* than the allowlist is not. `load_credentials`
 reads scopes from the token file itself (not forced to `SCOPES`) so an old narrow token still
 refreshes cleanly after `SCOPES` grows.
+
+## Goal 8: per-user credentials + per-user notes target
+
+- **`creds` is passed explicitly, first arg.** Every `app/google/*` call and every writes-service
+  function now takes a live `creds: Credentials` (the current user's). Routers get it from
+  `Depends(get_current_credentials)`; the writes service forwards it into the thin client wrappers.
+  There is no global `load_credentials()` — it is now `app.google.auth.load_credentials(session, user)`
+  and the scope assertion is **per-token** (a broader-than-allowlist grant → `ScopeError` → 403),
+  no longer a startup boot check.
+- **Overlay writes are user-scoped.** `upsert_overlay` / `get_group` / etc. take `user_id`;
+  `session.get(TaskOverlay, (user_id, tasklist_id, task_id))` (composite PK now includes `user_id`).
+- **`append_note(creds, doc_id, folder_id, body_text, summary=None)`** — the doc/folder ids come from
+  the **user's `user_settings`** (resolved by `app.settings.service.ensure_notes_target`, which
+  app-creates the folder + Doc on first need), never env vars. Still insert-only, still router-only,
+  still fail-closed on the folder-ancestry gate. `NOTES_DOC_ID`/`NOTES_FOLDER_ID` and
+  `app.google.bootstrap` are gone. The one sanctioned file-create surface grew by `create_folder`
+  (Drive root) alongside `create_doc_in_folder` — both `files().create`, so the AST insert-only test
+  is unchanged (no `files().delete` / content-overwriting `files().update`).
+- **`ensure_notes_target` self-heals stale ids (goal 8a).** Under `drive.file` per-file access is
+  keyed to the OAuth **client id** that created the file, so a changed client id (across a deploy)
+  or a user-deleted file makes the stored notes ids 404 — and the idempotency guard would otherwise
+  reuse a dead id forever. Before the reuse guard, `ensure_notes_target` probes reachability via
+  `docs.file_accessible` (a `files().get` **read** — no new mutation surface, AST test unaffected);
+  a definite **404** drops the id and re-bootstraps, any other error fails closed (never discards a
+  good id), results cached per process (a deploy re-probes each user once). Brief: `goal-8a.md`.

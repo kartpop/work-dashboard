@@ -1,0 +1,8 @@
+# Caddy auto-TLS (Let's Encrypt) in front of the app container (goal 8).
+# DASHBOARD_DOMAIN is injected from the environment (docker-compose passes it through).
+# Cloudflare DNS is DNS-only (grey cloud) so Caddy does the HTTP-01 challenge directly.
+
+{$DASHBOARD_DOMAIN} {
+	encode gzip
+	reverse_proxy app:8010
+}

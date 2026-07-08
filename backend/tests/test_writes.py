@@ -3,55 +3,29 @@
 Google is fully mocked: the async `app.google.tasks.*` wrappers are replaced with
 recording stubs so we can assert call counts, arguments, and ordering (insert
 before delete) without touching the real API or needing write scope.
+
+Goal 8: every Google wrapper now takes live `creds` as its FIRST argument, and the
+overlay PK is `(user_id, tasklist_id, task_id)`. The recorder drops `creds` from
+what it records so the existing call-shape assertions carry over unchanged.
 """
 
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine
-from sqlalchemy.pool import StaticPool
 
-from app.db import get_session
 from app.google.tasks import _UNSET, _reshape_task
-from app.main import app
 from app.overlay.models import TaskGroup, TaskOverlay
 
 # A fixed RFC3339 due that maps to the IST bucket "2026-06-15".
 DUE_0615 = "2026-06-15T00:00:00.000Z"
 
 
-@pytest.fixture
-def engine():
-    eng = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(eng)
-    yield eng
-    SQLModel.metadata.drop_all(eng)
-
-
-@pytest.fixture
-def session(engine):
-    with Session(engine) as s:
-        yield s
-
-
-@pytest.fixture
-def client(engine):
-    def _override():
-        with Session(engine) as s:
-            yield s
-
-    app.dependency_overrides[get_session] = _override
-    yield TestClient(app)
-    app.dependency_overrides.clear()
-
-
 class Recorder:
-    """Holds async stubs for the Google client and records every call in order."""
+    """Holds async stubs for the Google client and records every call in order.
+
+    Each wrapper takes `creds` first (goal 8); it is stripped from the recorded
+    tuple so the assertions read `(fn, tasklist_id, ...)` as before.
+    """
 
     def __init__(self):
         self.calls: list[tuple] = []
@@ -62,16 +36,16 @@ class Recorder:
         self.update_error: Exception | None = None
         self.content_error: Exception | None = None
 
-    async def get_task(self, tasklist_id, task_id):
+    async def get_task(self, creds, tasklist_id, task_id):
         self.calls.append(("get_task", tasklist_id, task_id))
         return self.tasks.get((tasklist_id, task_id))
 
-    async def update_due_date(self, tasklist_id, task_id, due):
+    async def update_due_date(self, creds, tasklist_id, task_id, due):
         self.calls.append(("update_due_date", tasklist_id, task_id, due))
         if self.update_error:
             raise self.update_error
 
-    async def insert_task(self, tasklist_id, body):
+    async def insert_task(self, creds, tasklist_id, body):
         self.calls.append(("insert_task", tasklist_id, body))
         if self.insert_error:
             raise self.insert_error
@@ -79,13 +53,13 @@ class Recorder:
         # (adds due / notes / parent keys) so create returns a full task.
         return _reshape_task({**self.insert_result, **body})
 
-    async def delete_task(self, tasklist_id, task_id):
+    async def delete_task(self, creds, tasklist_id, task_id):
         self.calls.append(("delete_task", tasklist_id, task_id))
         if self.delete_error:
             raise self.delete_error
 
     async def update_task_content(
-        self, tasklist_id, task_id, title=_UNSET, notes=_UNSET, status=_UNSET
+        self, creds, tasklist_id, task_id, title=_UNSET, notes=_UNSET, status=_UNSET
     ):
         body = {}
         if title is not _UNSET:
@@ -100,7 +74,7 @@ class Recorder:
         base = self.tasks.get((tasklist_id, task_id), {"id": task_id})
         return {**base, **body}
 
-    async def update_tasklist(self, tasklist_id, title):
+    async def update_tasklist(self, creds, tasklist_id, title):
         self.calls.append(("update_tasklist", tasklist_id, title))
         return {"id": tasklist_id, "title": title}
 
@@ -120,6 +94,22 @@ def google(monkeypatch):
     return rec
 
 
+@pytest.fixture
+def uid(seeded_user):
+    """The overlay PK's user_id for the authenticated user."""
+    return seeded_user.id
+
+
+def _overlay(uid, list_id="L1", task_id="T1", rank=None, group_id=None):
+    return TaskOverlay(
+        user_id=uid,
+        tasklist_id=list_id,
+        task_id=task_id,
+        rank=rank,
+        group_id=group_id,
+    )
+
+
 def _seed_task(google, list_id="L1", task_id="T1", **fields):
     google.tasks[(list_id, task_id)] = {
         "id": task_id,
@@ -134,7 +124,7 @@ def _seed_task(google, list_id="L1", task_id="T1", **fields):
 # ── reschedule ────────────────────────────────────────────────────────────────
 
 
-def test_reschedule_to_different_bucket(client, google, session):
+def test_reschedule_to_different_bucket(client, google, session, uid):
     # Current task has no due (NO_DATE bucket); target is 2026-06-15.
     google.tasks[("L1", "T1")] = {
         "id": "T1",
@@ -160,11 +150,11 @@ def test_reschedule_to_different_bucket(client, google, session):
     updates = [c for c in google.calls if c[0] == "update_due_date"]
     assert updates == [("update_due_date", "L1", "T1", DUE_0615)]
     # Overlay row reflects rank + group.
-    row = session.get(TaskOverlay, ("L1", "T1"))
+    row = session.get(TaskOverlay, (uid, "L1", "T1"))
     assert row is not None and row.rank == 100.0 and row.group_id is None
 
 
-def test_reschedule_idempotent_same_bucket(client, google, session):
+def test_reschedule_idempotent_same_bucket(client, google, session, uid):
     # Task already due on 2026-06-15; target bucket equals current → no Google write.
     google.tasks[("L1", "T1")] = {
         "id": "T1",
@@ -180,7 +170,7 @@ def test_reschedule_idempotent_same_bucket(client, google, session):
     assert resp.status_code == 200
     assert "update_due_date" not in google.names()
     # Overlay still upserted.
-    row = session.get(TaskOverlay, ("L1", "T1"))
+    row = session.get(TaskOverlay, (uid, "L1", "T1"))
     assert row is not None and row.rank == 50.0
 
 
@@ -202,7 +192,7 @@ def test_reschedule_to_no_date_clears_due(client, google, session):
     assert updates == [("update_due_date", "L1", "T1", None)]
 
 
-def test_reschedule_group_wrong_bucket_422(client, google, session):
+def test_reschedule_group_wrong_bucket_422(client, google, session, uid):
     google.tasks[("L1", "T1")] = {
         "id": "T1",
         "title": "x",
@@ -211,7 +201,9 @@ def test_reschedule_group_wrong_bucket_422(client, google, session):
         "notes": None,
     }
     # Group lives in a DIFFERENT bucket than the destination.
-    grp = TaskGroup(tasklist_id="L1", bucket_key="2026-06-20", name="g", rank=1.0)
+    grp = TaskGroup(
+        user_id=uid, tasklist_id="L1", bucket_key="2026-06-20", name="g", rank=1.0
+    )
     session.add(grp)
     session.commit()
     session.refresh(grp)
@@ -224,10 +216,10 @@ def test_reschedule_group_wrong_bucket_422(client, google, session):
     assert resp.json()["error"]["code"] == "group_wrong_bucket"
     # No Google write, no overlay row created.
     assert "update_due_date" not in google.names()
-    assert session.get(TaskOverlay, ("L1", "T1")) is None
+    assert session.get(TaskOverlay, (uid, "L1", "T1")) is None
 
 
-def test_reschedule_group_correct_bucket_200(client, google, session):
+def test_reschedule_group_correct_bucket_200(client, google, session, uid):
     google.tasks[("L1", "T1")] = {
         "id": "T1",
         "title": "x",
@@ -235,7 +227,9 @@ def test_reschedule_group_correct_bucket_200(client, google, session):
         "due": None,
         "notes": None,
     }
-    grp = TaskGroup(tasklist_id="L1", bucket_key="2026-06-15", name="g", rank=1.0)
+    grp = TaskGroup(
+        user_id=uid, tasklist_id="L1", bucket_key="2026-06-15", name="g", rank=1.0
+    )
     session.add(grp)
     session.commit()
     session.refresh(grp)
@@ -246,7 +240,7 @@ def test_reschedule_group_correct_bucket_200(client, google, session):
     )
     assert resp.status_code == 200
     assert resp.json()["group_id"] == grp.id
-    row = session.get(TaskOverlay, ("L1", "T1"))
+    row = session.get(TaskOverlay, (uid, "L1", "T1"))
     assert row is not None and row.group_id == grp.id
 
 
@@ -262,7 +256,7 @@ def test_reschedule_task_not_found_404(client, google):
 # ── move ──────────────────────────────────────────────────────────────────────
 
 
-def test_move_happy_path(client, google, session):
+def test_move_happy_path(client, google, session, uid):
     google.tasks[("L1", "T1")] = {
         "id": "T1",
         "title": "x",
@@ -278,7 +272,7 @@ def test_move_happy_path(client, google, session):
         "notes": "n",
     }
     # Seed a source overlay row to verify migration.
-    session.add(TaskOverlay(tasklist_id="L1", task_id="T1", rank=9.0, group_id=None))
+    session.add(_overlay(uid, rank=9.0))
     session.commit()
 
     resp = client.post("/tasks/L1/T1/move", json={"target_list_id": "L2", "rank": 7.0})
@@ -295,8 +289,8 @@ def test_move_happy_path(client, google, session):
     assert names.index("insert_task") < names.index("delete_task")
     # Overlay migrated: old gone, new present with rank and group None.
     session.expire_all()
-    assert session.get(TaskOverlay, ("L1", "T1")) is None
-    new_row = session.get(TaskOverlay, ("L2", "NEW1"))
+    assert session.get(TaskOverlay, (uid, "L1", "T1")) is None
+    new_row = session.get(TaskOverlay, (uid, "L2", "NEW1"))
     assert new_row is not None and new_row.rank == 7.0 and new_row.group_id is None
 
 
@@ -318,7 +312,7 @@ def test_move_with_due_date_reschedules_on_insert(client, google, session):
     assert resp.status_code == 200
     inserts = [c for c in google.calls if c[0] == "insert_task"]
     assert len(inserts) == 1 and inserts[0][2]["due"] == DUE_0615
-    # No separate update_due_date — the reschedule rides the insert body.
+    # No separate update_due_date — the reschedule rides the insert.
     assert "update_due_date" not in google.names()
 
 
@@ -357,7 +351,7 @@ def test_move_omitted_due_preserves_source_due(client, google, session):
     assert inserts[0][2]["due"] == DUE_0615
 
 
-def test_move_into_group_in_dest_bucket_200(client, google, session):
+def test_move_into_group_in_dest_bucket_200(client, google, session, uid):
     google.tasks[("L1", "T1")] = {
         "id": "T1",
         "title": "x",
@@ -367,7 +361,9 @@ def test_move_into_group_in_dest_bucket_200(client, google, session):
     }
     google.insert_result = {"id": "NEW1"}
     # A group in the DESTINATION list + destination bucket.
-    grp = TaskGroup(tasklist_id="L2", bucket_key="2026-06-15", name="g", rank=1.0)
+    grp = TaskGroup(
+        user_id=uid, tasklist_id="L2", bucket_key="2026-06-15", name="g", rank=1.0
+    )
     session.add(grp)
     session.commit()
     session.refresh(grp)
@@ -384,11 +380,11 @@ def test_move_into_group_in_dest_bucket_200(client, google, session):
     assert resp.status_code == 200
     assert resp.json()["group_id"] == grp.id
     session.expire_all()
-    row = session.get(TaskOverlay, ("L2", "NEW1"))
+    row = session.get(TaskOverlay, (uid, "L2", "NEW1"))
     assert row is not None and row.group_id == grp.id
 
 
-def test_move_group_wrong_bucket_422_no_writes(client, google, session):
+def test_move_group_wrong_bucket_422_no_writes(client, google, session, uid):
     google.tasks[("L1", "T1")] = {
         "id": "T1",
         "title": "x",
@@ -397,7 +393,9 @@ def test_move_group_wrong_bucket_422_no_writes(client, google, session):
         "notes": None,
     }
     # Group lives in a different bucket than the drop target → reject before any write.
-    grp = TaskGroup(tasklist_id="L2", bucket_key="2026-06-20", name="g", rank=1.0)
+    grp = TaskGroup(
+        user_id=uid, tasklist_id="L2", bucket_key="2026-06-20", name="g", rank=1.0
+    )
     session.add(grp)
     session.commit()
     session.refresh(grp)
@@ -426,7 +424,7 @@ def test_move_same_list_400(client, google, session):
     assert google.calls == []
 
 
-def test_move_insert_fails_502_no_delete(client, google, session):
+def test_move_insert_fails_502_no_delete(client, google, session, uid):
     google.tasks[("L1", "T1")] = {
         "id": "T1",
         "title": "x",
@@ -435,7 +433,7 @@ def test_move_insert_fails_502_no_delete(client, google, session):
         "notes": None,
     }
     google.insert_error = RuntimeError("boom")
-    session.add(TaskOverlay(tasklist_id="L1", task_id="T1", rank=9.0, group_id=None))
+    session.add(_overlay(uid, rank=9.0))
     session.commit()
 
     resp = client.post("/tasks/L1/T1/move", json={"target_list_id": "L2", "rank": 7.0})
@@ -444,10 +442,10 @@ def test_move_insert_fails_502_no_delete(client, google, session):
     # delete never called; source overlay intact.
     assert "delete_task" not in google.names()
     session.expire_all()
-    assert session.get(TaskOverlay, ("L1", "T1")) is not None
+    assert session.get(TaskOverlay, (uid, "L1", "T1")) is not None
 
 
-def test_move_delete_fails_after_insert_502_no_migration(client, google, session):
+def test_move_delete_fails_after_insert_502_no_migration(client, google, session, uid):
     google.tasks[("L1", "T1")] = {
         "id": "T1",
         "title": "x",
@@ -463,7 +461,7 @@ def test_move_delete_fails_after_insert_502_no_migration(client, google, session
         "notes": None,
     }
     google.delete_error = RuntimeError("boom")
-    session.add(TaskOverlay(tasklist_id="L1", task_id="T1", rank=9.0, group_id=None))
+    session.add(_overlay(uid, rank=9.0))
     session.commit()
 
     resp = client.post("/tasks/L1/T1/move", json={"target_list_id": "L2", "rank": 7.0})
@@ -473,14 +471,14 @@ def test_move_delete_fails_after_insert_502_no_migration(client, google, session
     names = google.names()
     assert "insert_task" in names and "delete_task" in names
     session.expire_all()
-    assert session.get(TaskOverlay, ("L1", "T1")) is not None
-    assert session.get(TaskOverlay, ("L2", "NEW1")) is None
+    assert session.get(TaskOverlay, (uid, "L1", "T1")) is not None
+    assert session.get(TaskOverlay, (uid, "L2", "NEW1")) is None
 
 
 # ── create ─────────────────────────────────────────────────────────────────────
 
 
-def test_create_task(client, google, session):
+def test_create_task(client, google, session, uid):
     google.insert_result = {"id": "NEW1"}
     resp = client.post("/tasks/L1", json={"title": "new task", "rank": 500.0})
     assert resp.status_code == 201
@@ -494,7 +492,7 @@ def test_create_task(client, google, session):
     inserts = [c for c in google.calls if c[0] == "insert_task"]
     assert len(inserts) == 1 and "due" not in inserts[0][2]
     # Overlay row seeded with the client rank.
-    row = session.get(TaskOverlay, ("L1", "NEW1"))
+    row = session.get(TaskOverlay, (uid, "L1", "NEW1"))
     assert row is not None and row.rank == 500.0
 
 
@@ -569,16 +567,16 @@ def test_uncomplete_task(client, google, session):
 # ── delete (user path: immediate Google delete + overlay row removal) ───────────
 
 
-def test_delete_task_removes_overlay(client, google, session):
+def test_delete_task_removes_overlay(client, google, session, uid):
     _seed_task(google)
-    session.add(TaskOverlay(tasklist_id="L1", task_id="T1", rank=3.0, group_id=None))
+    session.add(_overlay(uid, rank=3.0))
     session.commit()
     resp = client.delete("/tasks/L1/T1")
     assert resp.status_code == 200
     assert resp.json()["deleted"] is True
     assert google.names().count("delete_task") == 1
     session.expire_all()
-    assert session.get(TaskOverlay, ("L1", "T1")) is None
+    assert session.get(TaskOverlay, (uid, "L1", "T1")) is None
 
 
 def test_delete_missing_task_404(client, google, session):
@@ -589,9 +587,9 @@ def test_delete_missing_task_404(client, google, session):
     assert "delete_task" not in google.names()
 
 
-def test_delete_task_google_failure_502(client, google, session):
+def test_delete_task_google_failure_502(client, google, session, uid):
     _seed_task(google)
-    session.add(TaskOverlay(tasklist_id="L1", task_id="T1", rank=3.0, group_id=None))
+    session.add(_overlay(uid, rank=3.0))
     session.commit()
     google.delete_error = RuntimeError("boom")
     resp = client.delete("/tasks/L1/T1")
@@ -599,7 +597,7 @@ def test_delete_task_google_failure_502(client, google, session):
     assert resp.json()["error"]["code"] == "google_delete_failed"
     # Overlay row preserved when the Google delete fails.
     session.expire_all()
-    assert session.get(TaskOverlay, ("L1", "T1")) is not None
+    assert session.get(TaskOverlay, (uid, "L1", "T1")) is not None
 
 
 # ── list rename (tasklists resource) ────────────────────────────────────────────
@@ -647,5 +645,5 @@ def test_get_task_maps_bad_id_to_none(monkeypatch, status):
         def tasks(self):
             return _Tasks()
 
-    monkeypatch.setattr(t, "_tasks_service", lambda: _Svc())
-    assert t._get_task("L1", "bad") is None
+    monkeypatch.setattr(t, "_tasks_service", lambda _creds: _Svc())
+    assert t._get_task(object(), "L1", "bad") is None

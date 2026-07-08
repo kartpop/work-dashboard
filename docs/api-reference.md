@@ -3,6 +3,32 @@
 The HTTP surface of the backend, grouped by the milestone that introduced it. For setup and run
 steps see the root [README](../README.md); for milestone history see [goals/](goals/).
 
+## Auth & multi-tenancy (goal 8)
+
+Google Sign-In is the OAuth grant. **Every non-auth endpoint requires a session** and is scoped to
+the signed-in user; an unauthenticated call returns **401** in the standard error envelope.
+
+- `GET /auth/login` — 302 to Google consent (identity + tasks + calendar.readonly + drive.file,
+  `access_type=offline`).
+- `GET /auth/callback?code=&state=` — verifies the ID token, enforces the email allowlist, upserts
+  the `user` row (refresh token stored **Fernet-encrypted**), sets the session cookie, 302s to the
+  app. A non-allowlisted account → 302 to `?auth_error=not_invited` (no row, no token).
+- `POST /auth/logout` — clears the session. `GET /auth/me` — `{id, email, name, picture,
+  is_superuser}` or 401.
+- Sessions are a signed `HttpOnly`/`Secure`/`SameSite=Lax` cookie (Starlette `SessionMiddleware`).
+
+### Settings (`user_settings`, replaces env vars)
+
+- `GET /settings` — `{calendars:[{id, summary, primary, background_color, enabled}],
+  enabled_calendar_ids, notes_folder_id, notes_doc_id, notes_folder_url, notes_doc_url}`.
+  `calendars` comes from `calendarList.list`; visiting also **bootstraps** the user's notes
+  folder + Doc if absent.
+- `PUT /settings/calendars` — `{calendar_ids:[...]}` sets the extra (non-primary) calendars merged
+  into the day strip; free-text ids not in `calendarList` are accepted (add-by-id).
+- `GET|POST /settings/allowed-emails`, `DELETE /settings/allowed-emails/{email}` — **superuser
+  only** (403 otherwise). `POST {email}` invites; `DELETE` blocks future sign-ins (the superuser's
+  own email can't be removed).
+
 ## Tasks: reads & overlay
 
 Reads are `GET /tasks` (all lists, merged with the local overlay), plus overlay PATCH and group
@@ -21,12 +47,12 @@ Read-only; the calendar surface has **zero** write capability.
   `null`. `my_response` is the owner's own RSVP (`responseStatus` of the `self: true` attendee;
   `null` for events with no owner attendee entry — the strip treats that as accepted).
   `organizer` is the organizer's display name, falling back to email.
-- The day window merges `primary` **plus every id in `EXTRA_CALENDAR_IDS`** (comma-separated
-  env var — the work calendar the owner shared into the personal account; unset → primary-only),
-  deduped by `iCalUID` (the primary copy wins for an invited-attendee duplicate) and sorted by
-  start. Extra calendars are **best-effort**: a failing one logs a warning and the rest still
-  return; a primary failure is a `502`. Calendar IDs are **config-only** — never from LLM output
-  or request payloads (same hygiene rule as the Docs IDs).
+- The day window merges `primary` **plus the user's toggled-on calendars** (goal 8:
+  `user_settings.enabled_calendar_ids`, set via `PUT /settings/calendars`; replaces the old
+  `EXTRA_CALENDAR_IDS` env var), deduped by `iCalUID` (the primary copy wins for an
+  invited-attendee duplicate) and sorted by start. Extra calendars are **best-effort**: a failing
+  one logs a warning and the rest still return; a primary failure is a `502`. Calendar IDs are
+  **config-only** — never from LLM output or request payloads (same hygiene rule as the Docs IDs).
 
 ## Write endpoints
 

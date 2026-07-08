@@ -1,7 +1,11 @@
 """Unit tests for the goal-7b calendar day-window read path.
 
 The pure helpers (IST day bounds, meet-link extraction, reshape, multi-calendar
-merge/dedupe, env parsing) are tested directly — no Google API contact.
+merge/dedupe) are tested directly — no Google API contact.
+
+Goal 8: `get_day_events`/`_fetch_day_events` take live `creds` first and an explicit
+`extra_calendar_ids` list (the `EXTRA_CALENDAR_IDS` env + `_extra_calendar_ids()`
+helper are gone — extras come from the user's settings row now).
 """
 
 from __future__ import annotations
@@ -150,21 +154,12 @@ def test_merge_all_day_sorts_before_timed_same_day():
     assert [e["id"] for e in merged] == ["allday", "timed"]
 
 
-def test_extra_calendar_ids_unset(monkeypatch):
-    monkeypatch.delenv("EXTRA_CALENDAR_IDS", raising=False)
-    assert cal._extra_calendar_ids() == []
-
-
-def test_extra_calendar_ids_parsed(monkeypatch):
-    monkeypatch.setenv("EXTRA_CALENDAR_IDS", " work@x.com , , team@x.com ")
-    assert cal._extra_calendar_ids() == ["work@x.com", "team@x.com"]
+# ── Multi-calendar day fetch: extras come from a passed-in list (goal 8) ─────────
 
 
 def test_fetch_day_events_extra_best_effort(monkeypatch):
     """A failing extra calendar degrades to a logged warning; primary still returns."""
     monkeypatch.setattr(cal, "build", lambda *a, **k: object())
-    monkeypatch.setattr(cal, "load_credentials", lambda: None)
-    monkeypatch.setenv("EXTRA_CALENDAR_IDS", "good@x.com,bad@x.com")
 
     def fake_fetch(service, calendar_id, time_min, time_max):
         if calendar_id == "bad@x.com":
@@ -172,15 +167,15 @@ def test_fetch_day_events_extra_best_effort(monkeypatch):
         return [{"id": calendar_id, "start": {"dateTime": "2026-07-07T09:00:00+05:30"}}]
 
     monkeypatch.setattr(cal, "_fetch_calendar_day", fake_fetch)
-    events = cal._fetch_day_events(date(2026, 7, 7))
+    events = cal._fetch_day_events(
+        object(), date(2026, 7, 7), ["good@x.com", "bad@x.com"]
+    )
     ids = {e["id"] for e in events}
     assert "primary" in ids and "good@x.com" in ids and "bad@x.com" not in ids
 
 
-def test_fetch_day_events_primary_only_when_unset(monkeypatch):
+def test_fetch_day_events_primary_only_when_empty(monkeypatch):
     monkeypatch.setattr(cal, "build", lambda *a, **k: object())
-    monkeypatch.setattr(cal, "load_credentials", lambda: None)
-    monkeypatch.delenv("EXTRA_CALENDAR_IDS", raising=False)
     monkeypatch.setattr(
         cal,
         "_fetch_calendar_day",
@@ -188,15 +183,11 @@ def test_fetch_day_events_primary_only_when_unset(monkeypatch):
             {"id": cid, "start": {"dateTime": "2026-07-07T09:00:00+05:30"}}
         ],
     )
-    events = cal._fetch_day_events(date(2026, 7, 7))
+    events = cal._fetch_day_events(object(), date(2026, 7, 7), [])
     assert [e["id"] for e in events] == ["primary"]
 
 
-def test_day_endpoint_invalid_date_returns_400():
-    from fastapi.testclient import TestClient
-
-    from app.main import app
-
-    resp = TestClient(app).get("/calendar/day?date=not-a-date")
+def test_day_endpoint_invalid_date_returns_400(client):
+    resp = client.get("/calendar/day?date=not-a-date")
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "invalid_date"

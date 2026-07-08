@@ -16,41 +16,76 @@ insert is the only mutation of an existing doc, and it is insert-only.
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 from googleapiclient.discovery import build
 
-from app.google.auth import load_credentials
+if TYPE_CHECKING:
+    from google.oauth2.credentials import Credentials
 
 _DOC_MIME = "application/vnd.google-apps.document"
+_FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
-def _docs_service():
-    return build("docs", "v1", credentials=load_credentials(), cache_discovery=False)
+def _docs_service(creds: "Credentials"):
+    return build("docs", "v1", credentials=creds, cache_discovery=False)
 
 
-def _drive_service():
-    return build("drive", "v3", credentials=load_credentials(), cache_discovery=False)
+def _drive_service(creds: "Credentials"):
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
 # ── Read helper: the folder-ancestry gate's one Drive call ────────────────────
 
 
-def _get_parents(file_id: str) -> list[str]:
-    service = _drive_service()
+def _get_parents(creds: "Credentials", file_id: str) -> list[str]:
+    service = _drive_service(creds)
     meta = service.files().get(fileId=file_id, fields="parents").execute()
     return meta.get("parents", []) or []
 
 
-async def get_parents(file_id: str) -> list[str]:
+async def get_parents(creds: "Credentials", file_id: str) -> list[str]:
     """Return a file's direct parent folder ids (for the ancestry gate)."""
-    return await asyncio.to_thread(_get_parents, file_id)
+    return await asyncio.to_thread(_get_parents, creds, file_id)
+
+
+# ── Accessibility probe: is a stored file still reachable by THIS client? ──────
+
+
+def _file_accessible(creds: "Credentials", file_id: str) -> bool:
+    """True if this OAuth client can still see `file_id` (a plain `files.get` read).
+
+    Under `drive.file`, per-file access is keyed to the OAuth **client id** that
+    created the file — so a file created by a *different* client id (or a file the
+    user deleted) returns **404** to this client even though the id is well-formed.
+    That 404 is the definitive "no longer ours" signal → `False`. Any other error
+    (403/5xx/transient) is NOT a not-found signal, so we re-raise and let the caller
+    fail closed rather than discard a still-good id. Never a mutation — a read.
+    """
+    service = _drive_service(creds)
+    try:
+        service.files().get(fileId=file_id, fields="id").execute()
+        return True
+    except HttpError as exc:
+        if getattr(exc, "resp", None) is not None and exc.resp.status == 404:
+            return False
+        raise
+
+
+async def file_accessible(creds: "Credentials", file_id: str) -> bool:
+    """Return whether the current client can still reach a stored file (see above)."""
+    return await asyncio.to_thread(_file_accessible, creds, file_id)
 
 
 # ── Insert-only note write (Docs batchUpdate) ─────────────────────────────────
 
 
 def _insert_note(
-    doc_id: str, heading_text: str, body_text: str, summary_text: str | None = None
+    creds: "Credentials",
+    doc_id: str,
+    heading_text: str,
+    body_text: str,
+    summary_text: str | None = None,
 ) -> None:
     """Insert a Heading-3 timestamp + optional one-liner + verbatim body at the TOP.
 
@@ -69,7 +104,7 @@ def _insert_note(
     so consecutive notes read as separated entries, not a run-on wall. The
     delimiter also keeps the previously top-most content in its own paragraph.
     """
-    service = _docs_service()
+    service = _docs_service(creds)
 
     summary_text = (summary_text or "").strip()
     # Block: "<heading>\n[<summary>\n]<body>\n\n" — heading, optional one-liner,
@@ -160,27 +195,53 @@ def _insert_note(
 
 
 async def insert_note(
-    doc_id: str, heading_text: str, body_text: str, summary_text: str | None = None
+    creds: "Credentials",
+    doc_id: str,
+    heading_text: str,
+    body_text: str,
+    summary_text: str | None = None,
 ) -> None:
     """Insert a timestamped note at the top of the configured Doc (insert-only).
 
     Optional `summary_text` renders as a bold one-liner between the timestamp and
     the verbatim body (goal 7c) — the only LLM-authored line in the entry.
     """
-    await asyncio.to_thread(_insert_note, doc_id, heading_text, body_text, summary_text)
+    await asyncio.to_thread(
+        _insert_note, creds, doc_id, heading_text, body_text, summary_text
+    )
 
 
-# ── The ONE sanctioned file-create (bootstrap only) ───────────────────────────
+# ── The sanctioned file-creates (bootstrap only) ──────────────────────────────
 
 
-def _create_doc_in_folder(title: str, folder_id: str) -> str:
+def _create_folder(creds: "Credentials", name: str) -> str:
+    """Create a folder at the user's Drive root and return its id.
+
+    Goal 8: each user's notes folder is app-created (`drive.file` can't write into a
+    user-chosen folder). No parent → Drive root; the user may move/rename it later.
+    """
+    service = _drive_service(creds)
+    created = (
+        service.files()
+        .create(body={"name": name, "mimeType": _FOLDER_MIME}, fields="id")
+        .execute()
+    )
+    return created["id"]
+
+
+async def create_folder(creds: "Credentials", name: str) -> str:
+    """Create the notes folder in the user's Drive (bootstrap; returns its id)."""
+    return await asyncio.to_thread(_create_folder, creds, name)
+
+
+def _create_doc_in_folder(creds: "Credentials", title: str, folder_id: str) -> str:
     """Create an empty Google Doc INSIDE `folder_id` and return its id.
 
     The parent is hard-coded to the caller-supplied folder — there is no code path
     that creates a file anywhere else, so the app's entire reachable file set lives
-    under the notes folder. Called only by the bootstrap command.
+    under the notes folder. Called only by the bootstrap path.
     """
-    service = _drive_service()
+    service = _drive_service(creds)
     created = (
         service.files()
         .create(
@@ -192,6 +253,6 @@ def _create_doc_in_folder(title: str, folder_id: str) -> str:
     return created["id"]
 
 
-async def create_doc_in_folder(title: str, folder_id: str) -> str:
+async def create_doc_in_folder(creds: "Credentials", title: str, folder_id: str) -> str:
     """Create the notes Doc inside the designated folder (bootstrap; returns its id)."""
-    return await asyncio.to_thread(_create_doc_in_folder, title, folder_id)
+    return await asyncio.to_thread(_create_doc_in_folder, creds, title, folder_id)

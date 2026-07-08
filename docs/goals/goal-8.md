@@ -23,8 +23,14 @@ scoping + encrypted tokens — not enterprise hardening.
   `GET /auth/login` → Google consent (identity + the three scopes, `access_type=offline`);
   `GET /auth/callback` verifies the ID token, upserts the `user` row, stores the refresh token,
   sets the session. Sign-out clears the session. Unauthenticated API/page access → login.
-  - **Email allowlist** (`ALLOWED_EMAILS`, comma-separated env): a non-allowlisted Google
-    account gets a friendly "not invited" page — no user row, no token stored.
+  - **Email allowlist — DB table + superuser (amended 2026-07-08).** The allowlist is a
+    simple `allowed_email` table (email, added_by, created_at) with CRUD exposed **only to
+    the superuser** in the settings page; the `ALLOWED_EMAILS` env var dies. **`SUPERUSER_EMAIL`**
+    (env) bootstraps it: that address is always allowed and its `user` row is flagged
+    `is_superuser` at first sign-in. A non-allowlisted Google account gets a friendly
+    "not invited" page — no user row, no token stored. Removing an email blocks *future*
+    sign-ins only (no session revocation, no row deletion — fine at this scale); the
+    superuser cannot remove their own email.
   - **Sessions:** Starlette `SessionMiddleware` — signed cookie, `HttpOnly`, `Secure`,
     `SameSite=Lax`, secret from `SESSION_SECRET`. No JWT machinery.
 - **2. Per-user Google credentials.** `user` table stores the refresh token **encrypted at rest**
@@ -36,27 +42,37 @@ scoping + encrypted tokens — not enterprise hardening.
 - **3. Row-level multi-tenancy.** `user_id` FK on every user-owned table: `scratch_entry`,
   `review_item`, the task-overlay rows, `task_group` (Alembic migration). Every router resolves
   `current_user` from the session via one dependency; every service query filters by it. The
-  scheduler backstop iterates per user with that user's credentials. Owner's existing local rows
-  migrate to the owner's user row (one-off claim command or migration arg — implementer's call;
-  executed via the owner-steps checklist when the local `overlay.db` is copied to the server).
+  scheduler backstop iterates per user with that user's credentials. **Existing local rows are
+  lost — no migration (amended 2026-07-08):** the overlay/review data is test-mode and
+  recreatable, so the server starts from an empty `overlay.db`. No claim command, no DB-copy
+  owner step.
 - **4. Per-user settings replace the env vars.** New `user_settings` storage +
   a minimal settings page:
   - **Calendars:** the app lists the calendars the account can already see
     (`calendarList.list` — within `calendar.readonly`; new fetch+reshape fn in
     `app/google/calendar.py`) and the user **toggles** which merge into the day strip. Replaces
     `EXTRA_CALENDAR_IDS`. Primary is always on; same `iCalUID` dedupe and best-effort extras.
+    Plus a free-text **add-calendar-by-ID** field (amended 2026-07-08) for calendars the
+    account can read but that don't appear in its `calendarList` — same best-effort merge.
   - **Notes Doc — auto-bootstrap:** on first need (first routed note, or settings visit) the app
     creates a **"Dashboard Notes" folder at the user's Drive root and the notes Doc inside it**,
     and stores both IDs in the user's settings. Replaces `NOTES_FOLDER_ID` *and* `NOTES_DOC_ID`;
     the CLI bootstrap command's logic is reused per-user. The folder-ancestry gate reads the
-    user's stored folder ID. IDs remain config-only (now DB-config) — never LLM output.
+    user's stored folder ID. IDs remain config-only (now DB-config) — never LLM output. The
+    settings page shows the folder/Doc IDs **read-only** (with Drive links) — not editable:
+    under `drive.file` the app can only write files it created, so a user-pasted ID would be
+    unwritable.
+  - **Allowed emails (superuser only):** the `allowed_email` CRUD from item 1 lives here;
+    hidden entirely for non-superusers (and the endpoints 403).
 - **5. Deployment artifacts.** Multi-stage Dockerfile (build the Vite bundle → FastAPI serves it
   via `StaticFiles`; one container, one process), `docker-compose.yml` (app + Caddy), `Caddyfile`
   (auto-TLS for `dashboard.<domain>`), SQLite in **WAL mode** on a mounted volume, and a nightly
-  `sqlite3 .backup` cron to a second on-disk path (off-box backup optional, owner's call).
+  `sqlite3 .backup` cron to a second on-disk path (off-box backup **explicitly skipped** —
+  locked 2026-07-08; the overlay data is recreatable, revisit if that changes).
   `docs/deploy.md` documents the stack; **`goal-8-owner-steps.md`** is the ordered checklist:
   web OAuth client + redirect URIs, consent screen **published unverified**, EC2 instance +
-  security group, Cloudflare DNS record, env secrets, copying `overlay.db` up, claiming rows.
+  security group, Cloudflare DNS record, env secrets (incl. `SUPERUSER_EMAIL`). *(No DB-copy
+  or row-claim steps — the server starts from an empty `overlay.db`.)*
 - **6. Local dev keeps working.** `http://localhost:8010` (or `:5173` proxied) as a second
   redirect URI on the same OAuth client; documented in the README. No separate dev auth system.
 
@@ -73,6 +89,9 @@ scoping + encrypted tokens — not enterprise hardening.
 - **SQLite stays** (WAL, single instance, volume + backup cron). Postgres is deferred until it
   actually hurts; the in-process scheduler shares the same single-instance assumption, so they
   move together if that day comes.
+- **TLS = Caddy + Let's Encrypt, Cloudflare DNS-only (re-confirmed 2026-07-08).** Cloudflare's
+  proxy/Tunnel modes considered and skipped — least ops surface wins. Backup = local-only
+  second path, no off-box copy.
 - **Pinned lists stay convention-by-title** ("My Tasks" is Google's default list name;
   "Follow-ups" is created once — the empty-column hint guides new users). No per-user pinned
   config in this goal.
@@ -88,8 +107,8 @@ scoping + encrypted tokens — not enterprise hardening.
 - Google app verification, Google Picker, any scope beyond the existing three.
 - Per-user pinned-list config or a list-visibility chooser (dropped g9a residue — revisit only
   if a real user hurts).
-- Rate limiting, audit logging, per-user API keys/quotas, admin UI (the allowlist env var is
-  the admin UI).
+- Rate limiting, audit logging, per-user API keys/quotas, admin UI beyond the superuser's
+  allowed-emails section in settings.
 - Any feature work — 7c closed the feature gaps; this goal is auth + tenancy + infra only.
 
 ## Acceptance criteria
@@ -97,6 +116,9 @@ scoping + encrypted tokens — not enterprise hardening.
 - Sign-in: allowlisted account → consent (exactly the three scopes + identity) → working
   dashboard; non-allowlisted → refusal page, no user row, no token persisted; sign-out works;
   unauthenticated API calls → 401 envelope.
+- Superuser: only the `SUPERUSER_EMAIL` account sees the allowed-emails section; adding an
+  email lets that account sign in; removing one blocks its next sign-in; allowlist endpoints
+  return 403 for non-superusers; the superuser's own email cannot be removed.
 - **Isolation (the headline check):** with two signed-in users, every surface — tasks, overlay
   writes, scratch, review queue, calendar day, settings — returns/mutates only the requesting
   user's rows; user B can neither read nor write user A's data by ID guessing (endpoint tests
