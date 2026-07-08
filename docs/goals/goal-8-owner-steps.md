@@ -3,6 +3,10 @@
 The ordered checklist of things only the owner can do (Google Cloud, secrets, EC2,
 DNS). Code is done; these wire it to the real world. Do them top-to-bottom.
 
+> **Test locally first.** See [goal-8-owner-steps-local.md](goal-8-owner-steps-local.md)
+> for the local walkthrough (cleanup, web OAuth client, `backend/.env`, sign-in flow,
+> two-user isolation test). Come back here once local is green.
+
 ## A. Google Cloud — OAuth web client + consent screen
 
 - [ ] In [Google Cloud Console](https://console.cloud.google.com/), select (or create)
