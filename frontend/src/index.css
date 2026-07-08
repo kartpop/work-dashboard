@@ -53,10 +53,24 @@ h1, h2, h3 {
   margin-bottom: 24px;
 }
 
-.dashboard-header h1 {
-  font-size: 28px;
-  margin: 0;
+/* Logo mark + title, kept together and un-shrunk so the calendar strip flexes
+   into the remaining width. Mark sized to roughly match the title's cap height. */
+.dashboard-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   flex-shrink: 0;
+}
+
+.brand-logo {
+  width: 28px;
+  height: 28px;
+  display: block;
+}
+
+.dashboard-header h1 {
+  font-size: 21px;
+  margin: 0;
   line-height: 1.1;
 }
 
@@ -1751,6 +1765,12 @@ h1, h2, h3 {
   padding: 40px 32px;
   background: var(--bg);
 }
+.signin-logo {
+  width: 44px;
+  height: 44px;
+  display: block;
+  margin: 0 auto 12px;
+}
 .signin-card h1 {
   margin: 0 0 8px;
   font-size: 30px;
@@ -1759,10 +1779,12 @@ h1, h2, h3 {
   color: var(--done);
   margin: 0 0 24px;
 }
+/* Light orange to echo the calendar accepted-event blocks (.sb-accepted). */
 .signin-btn {
   display: inline-block;
-  background: #1a73e8;
-  color: #fff;
+  background: #ffedd5;
+  color: var(--text);
+  border: 1px solid #fdba74;
   text-decoration: none;
   padding: 11px 22px;
   border-radius: 8px;
@@ -1770,7 +1792,7 @@ h1, h2, h3 {
   font-size: 15px;
 }
 .signin-btn:hover {
-  background: #1765cc;
+  background: #fed7aa;
 }
 .signin-error {
   color: var(--error);
