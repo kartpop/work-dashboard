@@ -27,6 +27,12 @@ DNS). Code is done; these wire it to the real world. Do them top-to-bottom.
       - `https://<DASHBOARD_DOMAIN>/auth/callback` (prod)
       - `http://localhost:8010/auth/callback` (local dev)
       Download the JSON as **`client_secret.json`** (it will have a `"web"` key).
+      > ⚠️ **Never replace this OAuth client id later.** Under `drive.file`, Google keys
+      > per-file access to the client id that *created* a file — a new client id (or a new
+      > GCP project) is a different app and gets 404 on every user's existing notes
+      > folder/Doc. Rotating the client **secret** is fine; changing the client **id** is
+      > not. (The app self-heals into a *fresh* Doc if this ever happens — goal 8a — but
+      > that orphans the old notes; don't rely on it.)
 
 ## B. Secrets
 
@@ -76,6 +82,11 @@ DNS). Code is done; these wire it to the real world. Do them top-to-bottom.
 - [ ] Add the nightly backup cron to the host crontab (see `docs/deploy.md`):
       `15 3 * * * cd ~/dashboard && docker compose exec -T app uv run python scripts/backup.py >> /var/log/dashboard-backup.log 2>&1`
 - [ ] Confirm a copy appears under the `dashboard-data` volume's `/data/backups`.
+- [ ] **Never `docker compose down -v`** and never migrate hosts without copying the
+      `dashboard-data` volume — the volume holds each user's notes folder/Doc ids (and all
+      overlay/session data). Losing it re-bootstraps everyone's notes into fresh Docs.
+      *(Two durability invariants — the volume here + the OAuth client id in step A. See
+      `docs/deploy.md` → "Durable per-user config".)*
 
 ## Notes / gotchas
 

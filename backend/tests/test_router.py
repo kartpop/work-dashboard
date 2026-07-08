@@ -130,13 +130,19 @@ def notes(monkeypatch):
     `create_folder` then `create_doc_in_folder`, then `append_note` runs its ancestry
     gate (`get_parents`) + `insert_note`. We record inserts and make ancestry pass
     (parents of the created doc include the created folder)."""
+    from app.settings import service as settings_svc
     from app.writes import service as writes_svc
 
     writes_svc._ancestry_ok.clear()
+    settings_svc._verified_targets.clear()
     rec = {"insert": [], "folder_id": "FOLDER-boot", "doc_id": "DOC-boot"}
 
     async def _create_folder(creds, name):
         return rec["folder_id"]
+
+    async def _file_accessible(creds, file_id):
+        # Goal-8a self-heal probe: the bootstrapped ids are always still ours here.
+        return True
 
     async def _create_doc_in_folder(creds, title, folder_id):
         return rec["doc_id"]
@@ -154,6 +160,7 @@ def notes(monkeypatch):
     monkeypatch.setattr("app.google.docs.create_doc_in_folder", _create_doc_in_folder)
     monkeypatch.setattr("app.google.docs.get_parents", _get_parents)
     monkeypatch.setattr("app.google.docs.insert_note", _insert_note)
+    monkeypatch.setattr("app.google.docs.file_accessible", _file_accessible)
     return rec
 
 

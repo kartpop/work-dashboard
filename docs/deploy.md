@@ -26,6 +26,27 @@ Browser ──HTTPS──> Caddy (:443, Let's Encrypt) ──> app (:8010)
 - **Tenancy:** every user-owned row has `user_id`; one `current_user` dependency
   scopes every query.
 
+## Durable per-user config — two invariants (goal 8a)
+
+Each user's notes **folder + Doc are app-created once** in their Drive and their ids are
+stored in `user_settings`. They stay the same file across every release **only if both of
+these hold** — treat them as hard operational invariants:
+
+1. **The `overlay.db` volume persists.** The stored ids live in SQLite on the
+   `dashboard-data` volume. `docker compose up -d --build` (a normal release) keeps named
+   volumes — but **`docker compose down -v` deletes them**, and a host migration must copy
+   the volume. Lose it and every user re-bootstraps a fresh folder/Doc (old ones orphaned).
+2. **The OAuth `client_id` never changes.** Under `drive.file`, Google keys per-file access
+   to the **client id that created the file** — a *new* client id (or new GCP project) is a
+   different app and gets **404** on the existing folder/Doc. Rotating the client **secret**
+   is fine; replacing the **client id** is not.
+
+The app **self-heals** the client-id case (goal 8a): `ensure_notes_target` probes a stored
+id and, on a definite 404, re-bootstraps a fresh folder/Doc so notes never 404 forever. But
+that starts a *new* Doc and orphans the old one — the self-heal is a safety net, **not** a
+reason to change the client id. Keep the client id and the volume stable and every user's
+notes id is stable forever, across any number of releases.
+
 ## Images / compose
 
 - `Dockerfile` — multi-stage: build the SPA (`node`), then a Python image that

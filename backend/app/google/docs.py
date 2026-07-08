@@ -49,6 +49,34 @@ async def get_parents(creds: "Credentials", file_id: str) -> list[str]:
     return await asyncio.to_thread(_get_parents, creds, file_id)
 
 
+# ── Accessibility probe: is a stored file still reachable by THIS client? ──────
+
+
+def _file_accessible(creds: "Credentials", file_id: str) -> bool:
+    """True if this OAuth client can still see `file_id` (a plain `files.get` read).
+
+    Under `drive.file`, per-file access is keyed to the OAuth **client id** that
+    created the file — so a file created by a *different* client id (or a file the
+    user deleted) returns **404** to this client even though the id is well-formed.
+    That 404 is the definitive "no longer ours" signal → `False`. Any other error
+    (403/5xx/transient) is NOT a not-found signal, so we re-raise and let the caller
+    fail closed rather than discard a still-good id. Never a mutation — a read.
+    """
+    service = _drive_service(creds)
+    try:
+        service.files().get(fileId=file_id, fields="id").execute()
+        return True
+    except HttpError as exc:
+        if getattr(exc, "resp", None) is not None and exc.resp.status == 404:
+            return False
+        raise
+
+
+async def file_accessible(creds: "Credentials", file_id: str) -> bool:
+    """Return whether the current client can still reach a stored file (see above)."""
+    return await asyncio.to_thread(_file_accessible, creds, file_id)
+
+
 # ── Insert-only note write (Docs batchUpdate) ─────────────────────────────────
 
 
