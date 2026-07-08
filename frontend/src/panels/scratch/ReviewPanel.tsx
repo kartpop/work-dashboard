@@ -13,32 +13,14 @@ interface Props {
     override?: { destination?: string; fields?: ReviewFields },
   ) => Promise<boolean>;
   onDismiss: (id: number) => Promise<void>;
-  onRouteNow?: () => void;
-  busy?: boolean;
 }
 
-export function ReviewQueue({
-  items,
-  onConfirm,
-  onDismiss,
-  onRouteNow,
-  busy,
-}: Props) {
+export function ReviewQueue({ items, onConfirm, onDismiss }: Props) {
   if (items.length === 0) return null;
   return (
     <>
       <div className="review-queue-head">
         <h3>Review queue</h3>
-        {onRouteNow && (
-          <button
-            className="route-now-btn"
-            onClick={onRouteNow}
-            disabled={busy}
-            title="Route all unrouted entries now"
-          >
-            {busy ? "Routing…" : "Route now"}
-          </button>
-        )}
       </div>
       <ul className="review-list">
         {items.map((item) => (

@@ -99,9 +99,13 @@ export function useScratchPanel() {
         text: trimmed,
       });
       setEntries((prev) => [created, ...prev]);
+      // When the router sends the capture to review, RECENT shows it "In review"
+      // immediately (from `created`) but the Review queue only knows on the next
+      // poll — refetch so both surfaces update together (no 45s lag).
+      if (created.routing_state === "in_review") await load();
       return created;
     },
-    [],
+    [load],
   );
 
   // Manual "route now" — same code path as the scheduled job. Reload after.

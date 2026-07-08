@@ -29,7 +29,10 @@ const STATE_LABEL: Record<string, string> = {
 const UNRESOLVED_STATES = new Set(["unrouted", "in_review"]);
 const ROUTED_TAIL_MAX = 5;
 
-// Shift+Enter files the whole editor, but the POST is HELD this long so an
+// Recent rows truncate to one line (full text via copy button + hover title).
+const firstLine = (text: string) => text.split("\n")[0];
+
+// Capture files the whole editor, but the POST is HELD this long so an
 // accidental capture is recoverable with one click (undo-by-never-sending — a
 // mirror of the g4a deferred-delete). Undo fires zero backend writes.
 const CAPTURE_UNDO_MS = 5000;
@@ -139,7 +142,8 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
   }, [restoreHeld]);
 
   // Capture the WHOLE editor as one entry, verbatim — but defer the write. Clear
-  // the editor now; the POST fires only once the undo window closes.
+  // the editor now; the POST fires only once the undo window closes. Fired by the
+  // Capture button and the Cmd/Ctrl+Enter secondary — never by a single keystroke.
   const submit = () => {
     if (!text.trim()) return;
     void commitPending(); // flush any previous still-held capture first
@@ -183,8 +187,10 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
       selectionStart: ta.selectionStart,
       selectionEnd: ta.selectionEnd,
     };
-    // Shift+Enter (primary) / Cmd|Ctrl+Enter (secondary) = capture. Plain Enter never submits.
-    if (e.key === "Enter" && (e.shiftKey || e.metaKey || e.ctrlKey)) {
+    // Cmd|Ctrl+Enter = deliberate secondary capture. Shift+Enter was removed —
+    // it fired accidental captures during normal editing (goal 7d). Plain Enter
+    // never submits (it continues a bullet); capture is button-first now.
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       void submit();
       return;
@@ -237,6 +243,12 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
     ...routedTail.map((e) => ({ ...e, dimmed: true })),
   ];
 
+  // "Route now" is the ~15-min backstop for captures that failed inline routing —
+  // only meaningful when an unrouted entry exists (routing is instant otherwise).
+  const hasUnrouted = scratch.entries.some(
+    (e) => e.routing_state === "unrouted",
+  );
+
   return (
     <section className="panel capture-panel" ref={panelRef}>
       <div className="panel-head">
@@ -254,7 +266,7 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
           ref={taRef}
           className="capture-input"
           value={text}
-          placeholder="Dump a thought: `- ` starts a bullet, Shift+Enter files it…"
+          placeholder="Dump a thought: `- ` starts a bullet, Capture button (or ⌘/Ctrl+Enter) files it…"
           rows={12}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
@@ -277,8 +289,6 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
         items={scratch.reviewItems}
         onConfirm={confirmItem}
         onDismiss={scratch.dismissItem}
-        onRouteNow={routeNow}
-        busy={scratch.busy}
       />
 
       <div
@@ -291,7 +301,19 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
       </div>
 
       <div className="scratch-recent">
-        <h3>Recent</h3>
+        <div className="scratch-recent-head">
+          <h3>Recent</h3>
+          {hasUnrouted && (
+            <button
+              className="route-now-btn"
+              onClick={routeNow}
+              disabled={scratch.busy}
+              title="Route all unrouted entries now"
+            >
+              {scratch.busy ? "Routing…" : "Route now"}
+            </button>
+          )}
+        </div>
         {scratch.isLoading ? (
           <p className="panel-status">Loading…</p>
         ) : recent.length === 0 ? (
@@ -300,7 +322,17 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
           <ul className="scratch-entries">
             {recent.map((e) => (
               <li key={e.id} className={e.dimmed ? "scratch-entry--dim" : ""}>
-                <span className="scratch-text">{e.text}</span>
+                <span className="scratch-text" title={e.text}>
+                  {firstLine(e.text)}
+                </span>
+                <button
+                  type="button"
+                  className="scratch-copy"
+                  title="Copy full text"
+                  onClick={() => navigator.clipboard.writeText(e.text)}
+                >
+                  ⧉
+                </button>
                 <span className={`scratch-badge state-${e.routing_state}`}>
                   {STATE_LABEL[e.routing_state] ?? e.routing_state}
                 </span>

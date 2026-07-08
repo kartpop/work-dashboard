@@ -855,6 +855,26 @@ h1, h2, h3 {
 
 .scratch-text {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Copy the full (untruncated) Recent entry to the clipboard. */
+.scratch-copy {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 0 4px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--done);
+  cursor: pointer;
+}
+
+.scratch-copy:hover {
+  color: var(--text);
 }
 
 .scratch-badge {
@@ -867,7 +887,11 @@ h1, h2, h3 {
   white-space: nowrap;
 }
 
-.scratch-badge.state-routed_task {
+/* Filed states read green ("done"); in-review reads amber/red ("needs me").
+   The badge is the only colored element on the row — the body stays neutral. */
+.scratch-badge.state-routed_task,
+.scratch-badge.state-kept_note,
+.scratch-badge.state-resolved {
   color: #047857;
   border-color: #047857;
 }
@@ -1055,8 +1079,17 @@ h1, h2, h3 {
   overflow-y: auto;
 }
 
-.scratch-recent > h3 {
+/* Recent header row: title + the conditional "Route now" backstop button. */
+.scratch-recent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   flex-shrink: 0;
+}
+
+.scratch-recent-head h3 {
+  margin: 0;
 }
 
 /* Resize handle between editor and recent sections: a full-height hit target with
@@ -1344,6 +1377,9 @@ h1, h2, h3 {
 .strip-block.sb-accepted {
   background: #ffedd5;
   border-color: #fdba74;
+  /* Fixed dark text — the background is a hardcoded light orange in both themes,
+     so inheriting the theme text var (light in dark mode) made titles invisible. */
+  color: #7c2d12;
 }
 
 .strip-block.sb-accepted:hover {
