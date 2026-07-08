@@ -19,6 +19,7 @@ export function SignInPage() {
   return (
     <main className="signin">
       <div className="signin-card">
+        <img className="signin-logo" src="/logo-mark.svg" alt="" />
         <h1>Dashboard</h1>
         <p className="signin-sub">
           Your tasks, calendar, and notes in one place.

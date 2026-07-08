@@ -1,4 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" role="img" aria-label="Logo">
+  <!-- node-graph mark: hub (left) + two nodes (right), C-shaped -->
+  <!-- brand colors: orange #F37E1F, green #12933E -->
   <g fill="none" stroke="#12933E" stroke-width="19" stroke-linecap="round">
     <line x1="68" y1="120" x2="172" y2="64"/>
     <line x1="68" y1="120" x2="172" y2="176"/>

@@ -23,7 +23,10 @@ export function DashboardPage({
     <main className="dashboard">
       {/* Header row: title + today's calendar strip (goal 7b); account controls right. */}
       <header className="dashboard-header">
-        <h1>Dashboard</h1>
+        <div className="dashboard-brand">
+          <img className="brand-logo" src="/logo-mark.svg" alt="" />
+          <h1>Dashboard</h1>
+        </div>
         <CalendarStrip />
         <div className="account-controls">
           <button
