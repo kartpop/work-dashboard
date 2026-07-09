@@ -55,6 +55,15 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger("router.service")
 
+# The router is opinionated: every routed task is filed into one of exactly these
+# two lists — the same lists the dashboard renders (frontend `PINNED_LIST_TITLES`
+# in TasksPanel.tsx) — and NEVER into any other Google list the user may have. A
+# task filed into an unrendered list is created successfully but never shown.
+# DEFAULT_LIST_TITLE is where an unclassified task lands. Keep both in sync with
+# the frontend constant and `schema.TargetList`.
+PINNED_LIST_TITLES = ("My Tasks", "Follow-ups")
+DEFAULT_LIST_TITLE = "My Tasks"
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -90,22 +99,40 @@ async def _dispose_note(
     return KEPT_NOTE
 
 
-async def _resolve_list_id(creds: "Credentials", list_hint: str | None) -> str:
-    """Map an optional list-hint to a real Google task-list id (deterministic).
+async def _resolve_list_id(creds: "Credentials", target_list: str | None) -> str:
+    """Resolve the classifier's `target_list` to a real Google task-list id.
 
-    Case-insensitive match on list title; falls back to the first (default) list.
-    Raises if Google has no lists or is unreachable (caller leaves entry re-routable).
+    Opinionated: routing files ONLY into the two pinned lists (`PINNED_LIST_TITLES`)
+    the dashboard renders — never into any other Google list. Matches the requested
+    list by title (case-insensitive); an unset/unknown target defaults to "My Tasks".
+    If the requested pinned list is missing but the other exists, falls back to the
+    other pinned list (never a third list). Raises if NEITHER pinned list exists
+    (the two-list prerequisite is unmet) or Google is unreachable — the caller then
+    leaves the entry re-routable.
     """
     raw_lists = await tasks_client.get_task_lists(creds)
-    if not raw_lists:
-        raise ApiError(502, "no_lists", "No Google task lists are available.")
-    if list_hint:
-        needle = list_hint.strip().lstrip("#").lower()
-        for tl in raw_lists:
-            title = (tl.get("title") or "").lower()
-            if needle and (needle == title or needle in title):
-                return tl["id"]
-    return raw_lists[0]["id"]
+    # title(lower) → id, restricted to the two pinned lists we are willing to write.
+    pinned = {t.lower(): None for t in PINNED_LIST_TITLES}
+    for tl in raw_lists:
+        title = (tl.get("title") or "").strip().lower()
+        if title in pinned and pinned[title] is None:
+            pinned[title] = tl["id"]
+
+    requested = (target_list or DEFAULT_LIST_TITLE).strip().lstrip("#").lower()
+    if requested not in pinned:
+        requested = DEFAULT_LIST_TITLE.lower()
+
+    # Prefer the requested list, then the primary default, then the other pinned list.
+    for title in (requested, DEFAULT_LIST_TITLE.lower(), *pinned):
+        if pinned.get(title) is not None:
+            return pinned[title]
+
+    raise ApiError(
+        502,
+        "no_pinned_lists",
+        "This account has neither 'My Tasks' nor 'Follow-ups'. Create both task "
+        "lists in Google Tasks — the dashboard requires them.",
+    )
 
 
 async def _create_task_from_fields(
@@ -119,7 +146,7 @@ async def _create_task_from_fields(
     title = (fields.title or "").strip()
     if not title:
         raise ApiError(422, "empty_title", "Router produced no task title.")
-    list_id = await _resolve_list_id(creds, fields.list_hint)
+    list_id = await _resolve_list_id(creds, fields.target_list)
 
     # 1) create (lands undated in NO_DATE) — the router's primary write. Notes are
     #    intentionally dropped: writing them would need `update_content`, which is NOT

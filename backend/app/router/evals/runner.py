@@ -66,9 +66,9 @@ def _field_check(case: dict, fields: dict) -> bool | None:
     if "title_contains" in case:
         title = (fields.get("title") or "").lower()
         checks.append(case["title_contains"].lower() in title)
-    if "list_hint_contains" in case:
-        hint = (fields.get("list_hint") or "").lower()
-        checks.append(case["list_hint_contains"].lower() in hint)
+    if "target_list" in case:
+        target = (fields.get("target_list") or "").lower()
+        checks.append(case["target_list"].lower() == target)
     if case.get("expects_due"):
         checks.append(bool(fields.get("due_date")))
     if not checks:

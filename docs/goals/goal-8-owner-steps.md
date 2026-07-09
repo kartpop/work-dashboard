@@ -201,6 +201,12 @@ docker run --rm python:3.12-slim python -c \
       your wife / friends' Google addresses. They can now sign in; each gets their own
       empty dashboard, their own notes folder/Doc (auto-created on first note or
       settings visit), and their own calendar toggles.
+- [ ] **Each invited user must have two Google Tasks lists titled exactly `My Tasks` and
+      `Follow-ups`.** These are the two pinned columns the dashboard renders, and the only
+      lists the auto-router files tasks into. A fresh Google account already has `My Tasks`;
+      the user adds `Follow-ups` in Google Tasks (phone/web). **If either is missing**, that
+      user's routed tasks are created but never appear in a column, and captured tasks stay
+      unrouted — so have each person create both lists before their first capture.
 - [ ] (Optional) In **Settings → Calendars**, toggle on any shared/extra calendars.
 
 ## G. Backups

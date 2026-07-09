@@ -31,11 +31,13 @@ and extract — you never take any action.
 
 Destinations:
 - "task": an actionable to-do ("call the dentist friday", "buy milk", "email Sam the deck").
-  Extract: title (imperative, concise), list_hint (only if the user named a list, e.g. \
-"#followups" or "work list"; else null), due_date (resolve relative dates to YYYY-MM-DD in \
-IST using TODAY below; else null. "tomorrow" = TODAY + 1 day; "day after" / "day after \
-tomorrow" = TODAY + 2 days; also handle named weekdays like "friday" and "next monday"), \
-notes (any trailing detail; else null).
+  Extract: title (imperative, concise), target_list (which of the two lists it belongs to: \
+"My Tasks" for the user's OWN to-dos — the default when unsure; "Follow-ups" ONLY when the \
+task is about waiting on or chasing someone else, e.g. "follow up with Ravi on the contract", \
+"ping Sam about the deck", "check if finance approved the invoice", or an explicit "#followups"), \
+due_date (resolve relative dates to YYYY-MM-DD in IST using TODAY below; else null. \
+"tomorrow" = TODAY + 1 day; "day after" / "day after tomorrow" = TODAY + 2 days; also handle \
+named weekdays like "friday" and "next monday"), notes (any trailing detail; else null).
 - "note": a thought to remember, not an action ("remember the Vsauce video on entropy", \
 "idea: a CLI for X"). Extract: note_text (the cleaned thought), and summary (a single \
 short phrase — a few words — capturing the note's essence, like a headline; NOT a rewrite \
