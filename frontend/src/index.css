@@ -38,10 +38,19 @@ h1, h2, h3 {
   font-weight: 600;
 }
 
+/* The dashboard fills the viewport as a flex column: a fixed-height header on top
+   and the top row filling the rest. Height comes from the layout (100dvh), NOT a
+   hard-coded header-size guess — so the columns are the same tall size on every
+   OS/browser, and each column scrolls its own body internally. `dvh` tracks mobile
+   browser chrome; the `vh` line above is the fallback for older browsers. */
 .dashboard {
   max-width: 1600px;
   margin: 0 auto;
   padding: 24px;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Header row: title left, calendar strip filling the remaining width (goal 7b).
@@ -51,6 +60,7 @@ h1, h2, h3 {
   align-items: center;
   gap: 24px;
   margin-bottom: 24px;
+  flex-shrink: 0;
 }
 
 /* Logo mark + title, kept together and un-shrunk so the calendar strip flexes
@@ -84,7 +94,10 @@ h1, h2, h3 {
   display: grid;
   grid-template-columns: var(--w0) var(--handle) var(--w1) var(--handle) var(--w2);
   align-items: stretch;
-  margin-bottom: 24px;
+  /* Fill the vertical space the header leaves; min-height:0 lets the columns'
+     own bodies scroll instead of stretching the page. */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* Let each column shrink below its content's intrinsic width (so ellipsis +
@@ -96,9 +109,23 @@ h1, h2, h3 {
 /* Below this width three columns are too cramped — stack them and hide the
    handles (the inline vars only set the template via the media query above). */
 @media (max-width: 1080px) {
+  /* Stacked layout: the three columns become full-width rows, so drop the fixed
+     viewport height and let the page scroll naturally. Each column gets a sensible
+     height floor rather than filling one screen each. */
+  .dashboard {
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
   .top-row-resizable {
     grid-template-columns: 1fr;
     gap: 20px;
+    flex: 0 0 auto;
+  }
+
+  .top-row-resizable > .panel {
+    min-height: 60vh;
   }
 
   .top-row-resizable .resize-handle {
@@ -1046,13 +1073,15 @@ h1, h2, h3 {
 
 /* ── Goal 7a: daily-driver polish ─────────────────────────────────────────── */
 
-/* Top-row columns (My Tasks | Follow-ups | Scratchpad) are viewport-height-capped
-   flex columns: the header stays pinned while the body scrolls internally. */
+/* Top-row columns (My Tasks | Follow-ups | Scratchpad) are flex columns that fill
+   the row's height (stretched by the grid): the header stays pinned while the body
+   scrolls internally. No max-height / min-height floor here — height comes from the
+   grid row, so the columns are consistently tall regardless of how little they hold
+   (an almost-empty column no longer collapses to a stub). */
 .top-row-resizable > .panel {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 120px);
-  min-height: 360px;
+  min-height: 0;
 }
 
 .top-row-resizable > .panel > .panel-head {

@@ -4,8 +4,10 @@
 {"text": "submit the reimbursement form tomorrow", "destination": "task", "expects_due": true}
 {"text": "renew car insurance by next monday", "destination": "task", "expects_due": true}
 {"text": "pick up dry cleaning", "destination": "task", "title_contains": "dry cleaning"}
-{"text": "#followups ping Ravi about the contract", "destination": "task", "list_hint_contains": "followups"}
+{"text": "#followups ping Ravi about the contract", "destination": "task", "target_list": "Follow-ups"}
 {"text": "book flights for the Goa trip", "destination": "task", "title_contains": "flight"}
+{"text": "follow up with Priya about the signed lease", "destination": "task", "target_list": "Follow-ups"}
+{"text": "buy groceries this evening", "destination": "task", "target_list": "My Tasks"}
 {"text": "review the PR from Anita", "destination": "task", "title_contains": "pr"}
 {"text": "pay the electricity bill on the 28th", "destination": "task", "expects_due": true}
 {"text": "remember the Vsauce video on entropy", "destination": "note"}

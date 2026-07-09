@@ -13,17 +13,26 @@ from pydantic import BaseModel, Field
 
 Destination = Literal["task", "note", "event", "unknown"]
 
+# The dashboard renders exactly two task lists; the router is opinionated and files
+# every task into one of them (never a third Google list). Keep in sync with the
+# frontend `PINNED_LIST_TITLES` (TasksPanel.tsx) and `service.PINNED_LIST_TITLES`.
+TargetList = Literal["My Tasks", "Follow-ups"]
+
 
 class RouterFields(BaseModel):
     """Extracted fields. Which ones are populated depends on the destination:
-    task → title (+ optional list_hint, due_date, notes); event → title,
+    task → title (+ optional target_list, due_date, notes); event → title,
     event_datetime, attendees; note → cleaned note text.
     """
 
     title: Optional[str] = Field(default=None, description="Task/event title.")
-    list_hint: Optional[str] = Field(
+    target_list: Optional[TargetList] = Field(
         default=None,
-        description="Name of the target task list if the user hinted one, else null.",
+        description=(
+            'Which list a task belongs to: "My Tasks" (default) for the user\'s own '
+            'to-dos, or "Follow-ups" for things they are waiting on or need to chase '
+            "with someone else. Null for non-task destinations."
+        ),
     )
     due_date: Optional[str] = Field(
         default=None,

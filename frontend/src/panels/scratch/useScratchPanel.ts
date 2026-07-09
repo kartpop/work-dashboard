@@ -11,7 +11,7 @@ export interface ScratchEntry {
 
 export interface ReviewFields {
   title?: string | null;
-  list_hint?: string | null;
+  target_list?: string | null;
   due_date?: string | null;
   notes?: string | null;
   note_text?: string | null;

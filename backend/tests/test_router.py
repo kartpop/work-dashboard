@@ -60,7 +60,7 @@ class Google:
         self.calls.append(("get_task_lists",))
         return [
             {"id": "L1", "title": "My Tasks", "tasks": []},
-            {"id": "L2", "title": "Followups", "tasks": []},
+            {"id": "L2", "title": "Follow-ups", "tasks": []},
         ]
 
     async def get_task(self, creds, list_id, task_id):
@@ -196,6 +196,75 @@ def test_high_conf_task_creates_one_task(session, user_a, google, fake_classify)
     assert "update_due_date" in google.names()  # due via reschedule (metadata)
     assert "delete_task" not in google.names()
     assert "update_task_content" not in google.names()
+
+
+def test_unhinted_task_targets_my_tasks_not_first_list(
+    session, user_a, google, fake_classify, monkeypatch
+):
+    """Regression: an unhinted task must land in the dashboard's pinned "My Tasks"
+    list, NOT Google's first-returned list. On accounts where the first list isn't
+    "My Tasks" (e.g. a pre-existing default + hand-created pinned lists), filing into
+    raw_lists[0] created the task successfully but the dashboard never rendered it."""
+
+    async def reordered_lists(creds):
+        # "My Tasks" is NOT first here — the buggy fallback would pick "Personal".
+        return [
+            {"id": "L0", "title": "Personal", "tasks": []},
+            {"id": "L1", "title": "My Tasks", "tasks": []},
+            {"id": "L2", "title": "Follow-ups", "tasks": []},
+        ]
+
+    monkeypatch.setattr("app.google.tasks.get_task_lists", reordered_lists)
+    _set(fake_classify, "task", 0.95, title="scold aayush", due_date=None)
+    state = run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, "scold aayush")
+        )
+    )
+    assert state == ROUTED_TASK
+    inserts = [c for c in google.calls if c[0] == "insert_task"]
+    assert len(inserts) == 1
+    assert inserts[0][1] == "L1"  # "My Tasks", not "L0" (Personal)
+
+
+def test_task_targeting_followups_lands_in_followups(
+    session, user_a, google, fake_classify
+):
+    """A task the classifier tags target_list="Follow-ups" is filed into that list
+    (L2), never My Tasks — the router honours the LLM's two-way list choice."""
+    _set(fake_classify, "task", 0.95, title="ping Ravi", target_list="Follow-ups")
+    state = run(
+        router_svc.route_entry(
+            session,
+            user_a,
+            DummyCreds(),
+            _entry(session, user_a, "follow up with ravi"),
+        )
+    )
+    assert state == ROUTED_TASK
+    inserts = [c for c in google.calls if c[0] == "insert_task"]
+    assert len(inserts) == 1
+    assert inserts[0][1] == "L2"  # "Follow-ups"
+
+
+def test_task_routing_leaves_entry_unrouted_when_no_pinned_lists(
+    session, user_a, google, fake_classify, monkeypatch
+):
+    """Opinionated: the router files ONLY into the two pinned lists. If an account has
+    neither, routing raises (never dumps into a third list) and the entry stays
+    re-routable — surfacing the two-list prerequisite instead of silently misfiling."""
+
+    async def other_lists(creds):
+        return [{"id": "LX", "title": "Personal", "tasks": []}]
+
+    monkeypatch.setattr("app.google.tasks.get_task_lists", other_lists)
+    _set(fake_classify, "task", 0.95, title="buy milk", due_date=None)
+    entry = _entry(session, user_a, "buy milk")
+    with pytest.raises(ApiError):
+        run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
+    assert "insert_task" not in google.names()
+    session.expire_all()
+    assert session.get(ScratchEntry, entry.id).routing_state == UNROUTED
 
 
 def test_high_conf_note_bootstraps_doc_and_writes_verbatim(
@@ -607,7 +676,7 @@ def test_eval_score_perfect_passes():
                 "fields": {
                     "title": c["text"],
                     "due_date": "2026-06-20" if c.get("expects_due") else None,
-                    "list_hint": "followups" if c.get("list_hint_contains") else None,
+                    "target_list": c.get("target_list"),
                 },
                 "case": c,
             }

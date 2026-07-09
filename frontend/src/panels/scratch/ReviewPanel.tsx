@@ -6,6 +6,10 @@ import type { ReviewFields, ReviewItem } from "./useScratchPanel";
 // of these two (calendar is read-only).
 const DESTINATIONS = ["task", "note"] as const;
 
+// The router files a task into exactly one of these two lists (never a third) —
+// keep in sync with the backend `schema.TargetList` / `PINNED_LIST_TITLES`.
+const TARGET_LISTS = ["My Tasks", "Follow-ups"] as const;
+
 interface Props {
   items: ReviewItem[];
   onConfirm: (
@@ -56,7 +60,12 @@ function ReviewRow({
   const [title, setTitle] = useState(item.fields.title ?? "");
   const [notes, setNotes] = useState(item.fields.notes ?? "");
   const [dueDate, setDueDate] = useState(item.fields.due_date ?? "");
-  const [listHint, setListHint] = useState(item.fields.list_hint ?? "");
+  // Default to the classifier's choice when it's one of the two lists, else "My Tasks".
+  const [targetList, setTargetList] = useState<(typeof TARGET_LISTS)[number]>(
+    (TARGET_LISTS as readonly string[]).includes(item.fields.target_list ?? "")
+      ? (item.fields.target_list as (typeof TARGET_LISTS)[number])
+      : "My Tasks",
+  );
   // Note fields: the raw body (fall back to the captured text) + the one-liner.
   const [noteText, setNoteText] = useState(
     item.fields.note_text ?? item.entry_text ?? "",
@@ -81,7 +90,7 @@ function ReviewRow({
             title: title || null,
             notes: notes || null,
             due_date: dueDate || null,
-            list_hint: listHint || null,
+            target_list: targetList,
           };
     onConfirm(item.id, { destination, fields }).catch(() => setPending(false));
   };
@@ -136,12 +145,22 @@ function ReviewRow({
               value={dueDate}
               onChange={(e) => setDueDate(e.target.value)}
             />
-            <input
-              className="review-hint"
-              value={listHint}
-              placeholder="list (optional)"
-              onChange={(e) => setListHint(e.target.value)}
-            />
+            <label className="review-list-label">
+              List
+              <select
+                className="review-list"
+                value={targetList}
+                onChange={(e) =>
+                  setTargetList(e.target.value as (typeof TARGET_LISTS)[number])
+                }
+              >
+                {TARGET_LISTS.map((l) => (
+                  <option key={l} value={l}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </label>
           </>
         ) : (
           <>

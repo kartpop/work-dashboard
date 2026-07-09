@@ -17,6 +17,11 @@ and [docs/goals/goal-8-owner-steps.md](docs/goals/goal-8-owner-steps.md).
 
 ## Prerequisites
 
+- **Two Google Tasks lists titled exactly `My Tasks` and `Follow-ups`.** The dashboard renders
+  these two lists (and only these two) as its pinned columns, and the scratchpad auto-router files
+  every task into one of them — never any other list. A brand-new Google account already has the
+  default `My Tasks` list; add `Follow-ups` yourself in Google Tasks. **Each user must have both**,
+  or their routed tasks are created but never shown, and captured tasks stay unrouted.
 - A Google Cloud **web** OAuth client secret at `client_secret.json` (repo root). Add both
   `http://localhost:8010/auth/callback` (dev) and your prod callback as authorized redirect URIs.
   Enable the Tasks, Calendar, Drive, and Docs APIs; publish the consent screen (unverified is fine).
