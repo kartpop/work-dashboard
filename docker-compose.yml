@@ -15,7 +15,7 @@ services:
     volumes:
       - dashboard-data:/data
       # The OAuth web-client secret, mounted read-only (never baked into the image).
-      - ./client_secret.json:/srv/backend/client_secret.json:ro
+      - ./client_secret.json:/srv/client_secret.json:ro
     expose:
       - "8010"
     healthcheck:
