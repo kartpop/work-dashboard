@@ -29,6 +29,12 @@ if TYPE_CHECKING:
 _DOC_MIME = "application/vnd.google-apps.document"
 _FOLDER_MIME = "application/vnd.google-apps.folder"
 
+# When the LLM gives no one-liner, the H3 headline still exists (a placeholder) so
+# the heading levels stay uniform — H3 = one-liner, H4 = timestamp, H5 = keywords —
+# across every note. A future "extract all H4s" search then reliably yields every
+# timestamp without the level shifting per-entry (goal 9).
+_NO_SUMMARY_PLACEHOLDER = "—"
+
 
 def _docs_service(creds: "Credentials"):
     return build("docs", "v1", credentials=creds, cache_discovery=False)
@@ -104,11 +110,14 @@ def _insert_note(
     batchUpdate applies its requests sequentially, so the style ranges see the
     just-inserted text. Insert-only — nothing existing is deleted or overwritten.
 
-    Entry shape (goal 9): the LLM one-liner is the **H3** headline, the timestamp the
-    **H4** beneath it, then optional **H5** keywords (comma-separated), the verbatim
-    body, and the delimiter. A missing summary promotes the timestamp back to **H3**
-    (no empty headline); empty/missing keywords skip the H5. Nothing blocks the write.
-    Uniform across all notes so later heading-extraction search has a stable substrate.
+    Entry shape (goal 9): the LLM one-liner is **always the H3** headline, the timestamp
+    **always the H4** beneath it, then optional **H5** keywords (comma-separated), the
+    verbatim body, and the delimiter. The heading levels are **stable per note** — a
+    missing summary uses a placeholder H3 (never promotes the timestamp) so the timestamp
+    stays H4 for **every** entry; empty/missing keywords skip only the (leaf-level) H5.
+    That uniformity is deliberate: a future "extract all H4s" search must reliably yield
+    every timestamp, which only holds if the level never shifts per-entry. Nothing blocks
+    the write.
 
     A trailing empty paragraph is styled as a light-gray delimiter with spacing
     above/below (goal 7a) — the Docs API has no horizontal-rule request, so a
@@ -117,19 +126,18 @@ def _insert_note(
     """
     service = _docs_service(creds)
 
-    summary_text = (summary_text or "").strip()
+    summary_text = (summary_text or "").strip() or _NO_SUMMARY_PLACEHOLDER
     keyword_text = _keyword_line(keywords)
 
     # The ordered paragraphs that make up this entry: (text, named-style). The
-    # one-liner is the H3 headline with the timestamp as the H4 beneath it; with no
-    # one-liner the timestamp is promoted to H3 (never an empty headline). The body
-    # is always present (even if empty); the H5 keyword line is conditional.
-    lines: list[tuple[str, str]] = []
-    if summary_text:
-        lines.append((summary_text, "HEADING_3"))
-        lines.append((heading_text, "HEADING_4"))
-    else:
-        lines.append((heading_text, "HEADING_3"))
+    # one-liner is ALWAYS the H3 headline and the timestamp ALWAYS the H4 beneath it —
+    # a blank summary uses a placeholder rather than shifting the timestamp up, so the
+    # heading levels stay uniform for later heading-extraction search. The body is
+    # always present (even if empty); only the H5 keyword line is conditional.
+    lines: list[tuple[str, str]] = [
+        (summary_text, "HEADING_3"),
+        (heading_text, "HEADING_4"),
+    ]
     if keyword_text:
         lines.append((keyword_text, "HEADING_5"))
     lines.append((body_text, "NORMAL_TEXT"))
@@ -195,8 +203,9 @@ async def insert_note(
 ) -> None:
     """Insert a timestamped note at the top of the configured Doc (insert-only).
 
-    Optional `summary_text` → an H4 one-liner; optional `keywords` → an H5 line
-    (goal 9). Both are the only LLM-authored lines; the body stays verbatim.
+    Optional `summary_text` → the H3 one-liner headline (a placeholder when absent, so
+    the timestamp stays H4); optional `keywords` → an H5 line (goal 9). Both are the
+    only LLM-authored lines; the body stays verbatim.
     """
     await asyncio.to_thread(
         _insert_note, creds, doc_id, heading_text, body_text, summary_text, keywords

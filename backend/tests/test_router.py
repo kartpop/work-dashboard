@@ -811,10 +811,10 @@ def test_format_note_heading_locked_format():
     )
 
 
-def test_insert_note_puts_h3_timestamp_at_top(monkeypatch):
-    """The batchUpdate inserts at index 1 (top of body), heading first with an H3
-    paragraph style — newest note lands above everything else. `insert_note` now
-    takes `creds` first (pass a dummy)."""
+def test_insert_note_puts_block_at_top_placeholder_h3(monkeypatch):
+    """The batchUpdate inserts at index 1 (top of body) — newest note lands above
+    everything else. With no one-liner, the H3 headline is a placeholder and the
+    timestamp stays H4 (stable levels for search). `insert_note` takes `creds` first."""
     from app.google import docs as docs_mod
 
     captured = {}
@@ -841,12 +841,13 @@ def test_insert_note_puts_h3_timestamp_at_top(monkeypatch):
     reqs = captured["requests"]
     assert captured["documentId"] == "DOC"
     assert reqs[0]["insertText"]["location"]["index"] == 1
-    assert reqs[0]["insertText"]["text"].startswith("6-July-2026, 8:41 PM IST\n")
+    # placeholder H3 headline, then the timestamp as H4 (never promoted to H3).
+    assert reqs[0]["insertText"]["text"].startswith(
+        f"{docs_mod._NO_SUMMARY_PLACEHOLDER}\n6-July-2026, 8:41 PM IST\n"
+    )
     # verbatim body, then a trailing empty paragraph (the delimiter, goal 7a)
     assert reqs[0]["insertText"]["text"].endswith("- a\n- b\n\n")
-    assert reqs[1]["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"] == (
-        "HEADING_3"
-    )
+    assert _para_styles(reqs)[:3] == ["HEADING_3", "HEADING_4", "NORMAL_TEXT"]
     assert reqs[1]["updateParagraphStyle"]["range"]["startIndex"] == 1
     # The last request styles the empty delimiter paragraph with a light-gray
     # borderBottom + spacing — insert-only, no HR request exists.
@@ -933,9 +934,10 @@ def test_insert_note_summary_no_keywords_skips_h5(monkeypatch):
     assert _para_styles(reqs)[:3] == ["HEADING_3", "HEADING_4", "NORMAL_TEXT"]
 
 
-def test_insert_note_empty_summary_degrades_to_g7_shape(monkeypatch):
-    """A missing/blank summary → no bold line, the goal-7 heading→body→delimiter
-    shape, never blocking the write."""
+def test_insert_note_blank_summary_uses_placeholder_h3_stable_timestamp(monkeypatch):
+    """A missing/blank summary → a placeholder H3 headline (never blocking the write),
+    with the timestamp staying H4. Levels are stable so a later "all H4s" search yields
+    every timestamp regardless of whether the one-liner was present."""
     from app.google import docs as docs_mod
 
     captured = _capture_batchupdate(monkeypatch)
@@ -945,7 +947,10 @@ def test_insert_note_empty_summary_degrades_to_g7_shape(monkeypatch):
         )
     )
     reqs = captured["requests"]
-    assert reqs[0]["insertText"]["text"] == "6-July-2026, 8:41 PM IST\n- a\n\n"
+    assert reqs[0]["insertText"]["text"] == (
+        f"{docs_mod._NO_SUMMARY_PLACEHOLDER}\n6-July-2026, 8:41 PM IST\n- a\n\n"
+    )
+    assert _para_styles(reqs)[:3] == ["HEADING_3", "HEADING_4", "NORMAL_TEXT"]
     assert not any("updateTextStyle" in r for r in reqs)
 
 

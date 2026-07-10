@@ -81,7 +81,9 @@ is classification + light extraction, not reasoning. That is a product decision,
   deterministic **truncation guard** (`service._guarded_note_body`: a missing/empty/`< 50%`-length
   `note_text` falls back to the **raw text verbatim** — a mangled extraction never silently loses
   words). The one-liner (`summary`, the H3 headline) and the optional `keywords` (H5) are the only
-  other LLM-authored lines; both degrade to skip when absent (the timestamp falls back to H3).
+  other LLM-authored lines. The **heading levels are stable per note**: the one-liner is always
+  H3 (a placeholder when absent, so the timestamp is always H4), and only the leaf-level H5
+  keywords skip when absent — a later "extract all H4s" search reliably yields every timestamp.
 - **`routed_doc_path`** (nullable, on `ScratchEntry`) records where a `kept_note` landed (null =
   default Doc), set on both auto-route and confirm-as-note; `GET /scratch` returns it.
 - Write set unchanged: still exactly `{create_task, reschedule, append_note}` (AST-pinned). The
