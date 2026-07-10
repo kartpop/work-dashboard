@@ -61,4 +61,10 @@ class UserSettings(SQLModel, table=True):
     # JSON list of extra calendar ids merged into the day strip (primary is always
     # on and is NOT stored here). Replaces EXTRA_CALENDAR_IDS.
     enabled_calendar_ids: str = Field(default="[]")
+    # JSON forest (goal 9): the user-defined notes folder/Doc tree rooted UNDER
+    # `notes_folder_id`. Each node is {node_id, name, kind: "folder"|"doc",
+    # drive_id, children}. Leaves are Docs, inner nodes are folders. The default
+    # `notes_doc_id` stays OUTSIDE this tree and remains the routing fallback.
+    # Empty ("[]") for existing users → behavior identical to today.
+    notes_index: str = Field(default="[]")
     updated_at: datetime = Field(default_factory=_utcnow, nullable=False)

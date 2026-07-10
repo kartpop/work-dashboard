@@ -32,6 +32,13 @@ const ROUTED_TAIL_MAX = 5;
 // Recent rows truncate to one line (full text via copy button + hover title).
 const firstLine = (text: string) => text.split("\n")[0];
 
+// A kept note's chip stays labeled "Note"; its hover shows WHERE the note was filed
+// (the hierarchy path, or the default Doc), and clicking it opens that Doc — the
+// newest entry is at the top, so no per-entry anchor is needed (goal 9).
+function noteChipTitle(path: string | null): string {
+  return path ? path.split("/").join(" / ") : "Dashboard — Notes";
+}
+
 // Capture files the whole editor, but the POST is HELD this long so an
 // accidental capture is recoverable with one click (undo-by-never-sending — a
 // mirror of the g4a deferred-delete). Undo fires zero backend writes.
@@ -287,6 +294,7 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
 
       <ReviewQueue
         items={scratch.reviewItems}
+        docPaths={scratch.docPaths}
         onConfirm={confirmItem}
         onDismiss={scratch.dismissItem}
       />
@@ -333,9 +341,21 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
                 >
                   ⧉
                 </button>
-                <span className={`scratch-badge state-${e.routing_state}`}>
-                  {STATE_LABEL[e.routing_state] ?? e.routing_state}
-                </span>
+                {e.routing_state === "kept_note" && e.routed_doc_url ? (
+                  <a
+                    className="scratch-badge state-kept_note scratch-badge--link"
+                    href={e.routed_doc_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={`Open in Docs — ${noteChipTitle(e.routed_doc_path)}`}
+                  >
+                    {STATE_LABEL.kept_note}
+                  </a>
+                ) : (
+                  <span className={`scratch-badge state-${e.routing_state}`}>
+                    {STATE_LABEL[e.routing_state] ?? e.routing_state}
+                  </span>
+                )}
               </li>
             ))}
           </ul>

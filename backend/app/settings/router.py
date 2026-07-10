@@ -8,9 +8,11 @@ hidden entirely from the non-superuser UI.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends
 from google.oauth2.credentials import Credentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from app.auth import service as auth_svc
@@ -95,6 +97,63 @@ async def set_calendars(
     return {
         "enabled_calendar_ids": settings_svc.get_enabled_calendar_ids(session, user.id)
     }
+
+
+# ── Notes hierarchy (goal 9) ──────────────────────────────────────────────────
+
+
+class NoteNodeIn(BaseModel):
+    """One incoming tree node. `drive_id` is deliberately absent — it is never
+    trusted from the client; materialization re-derives it by `node_id` (ID
+    hygiene, ADR layer 3)."""
+
+    node_id: str
+    name: str
+    kind: Literal["folder", "doc"]
+    children: list["NoteNodeIn"] = Field(default_factory=list)
+
+
+class NotesIndexUpdate(BaseModel):
+    nodes: list[NoteNodeIn] = Field(default_factory=list)
+
+
+def _node_out(node: dict) -> dict:
+    """Serialize a materialized node for the client (drive_id + a read-only link)."""
+    drive_id = node.get("drive_id")
+    kind = node.get("kind")
+    return {
+        "node_id": node.get("node_id"),
+        "name": node.get("name"),
+        "kind": kind,
+        "drive_id": drive_id,
+        "drive_url": (_doc_url(drive_id) if kind == "doc" else _folder_url(drive_id)),
+        "children": [_node_out(c) for c in (node.get("children") or [])],
+    }
+
+
+@router.get("/notes-index")
+async def get_notes_index(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Return the user's notes hierarchy (nodes with materialized drive ids/links)."""
+    forest = settings_svc.get_notes_index(session, user.id)
+    return {"nodes": [_node_out(n) for n in forest]}
+
+
+@router.put("/notes-index")
+async def put_notes_index(
+    body: NotesIndexUpdate,
+    user: User = Depends(get_current_user),
+    creds: Credentials = Depends(get_current_credentials),
+    session: Session = Depends(get_session),
+):
+    """Validate + eagerly materialize the edited tree, then return the persisted
+    tree (with drive ids). Validation violations → 422; a Drive failure partway
+    persists what succeeded and surfaces the error (retry is idempotent by node_id)."""
+    incoming = [n.model_dump() for n in body.nodes]
+    forest = await settings_svc.set_notes_index(session, creds, user.id, incoming)
+    return {"nodes": [_node_out(n) for n in forest]}
 
 
 # ── Allowed emails (superuser only) ───────────────────────────────────────────

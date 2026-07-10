@@ -10,8 +10,13 @@ const DESTINATIONS = ["task", "note"] as const;
 // keep in sync with the backend `schema.TargetList` / `PINNED_LIST_TITLES`.
 const TARGET_LISTS = ["My Tasks", "Follow-ups"] as const;
 
+// The default Doc sentinel in the destination dropdown — an empty target_doc_path
+// (null) routes to the app's default "Dashboard — Notes" Doc.
+const DEFAULT_DOC_LABEL = "Dashboard — Notes (default)";
+
 interface Props {
   items: ReviewItem[];
+  docPaths: string[];
   onConfirm: (
     id: number,
     override?: { destination?: string; fields?: ReviewFields },
@@ -19,7 +24,7 @@ interface Props {
   onDismiss: (id: number) => Promise<void>;
 }
 
-export function ReviewQueue({ items, onConfirm, onDismiss }: Props) {
+export function ReviewQueue({ items, docPaths, onConfirm, onDismiss }: Props) {
   if (items.length === 0) return null;
   return (
     <>
@@ -31,6 +36,7 @@ export function ReviewQueue({ items, onConfirm, onDismiss }: Props) {
           <ReviewRow
             key={item.id}
             item={item}
+            docPaths={docPaths}
             onConfirm={onConfirm}
             onDismiss={onDismiss}
           />
@@ -42,10 +48,12 @@ export function ReviewQueue({ items, onConfirm, onDismiss }: Props) {
 
 function ReviewRow({
   item,
+  docPaths,
   onConfirm,
   onDismiss,
 }: {
   item: ReviewItem;
+  docPaths: string[];
   onConfirm: Props["onConfirm"];
   onDismiss: Props["onDismiss"];
 }) {
@@ -71,6 +79,14 @@ function ReviewRow({
     item.fields.note_text ?? item.entry_text ?? "",
   );
   const [summary, setSummary] = useState(item.fields.summary ?? "");
+  // Destination Doc: prefill the classifier's proposed path when it's a real leaf,
+  // else the default Doc ("" sentinel). The dropdown only offers real leaves.
+  const [docPath, setDocPath] = useState(
+    item.fields.target_doc_path &&
+      docPaths.includes(item.fields.target_doc_path)
+      ? item.fields.target_doc_path
+      : "",
+  );
   const [pending, setPending] = useState(false);
 
   const confirm = () => {
@@ -84,6 +100,7 @@ function ReviewRow({
             ...item.fields,
             note_text: noteText || null,
             summary: summary || null,
+            target_doc_path: docPath || null,
           }
         : {
             ...item.fields,
@@ -164,6 +181,21 @@ function ReviewRow({
           </>
         ) : (
           <>
+            <label className="review-list-label">
+              Doc
+              <select
+                className="review-doc"
+                value={docPath}
+                onChange={(e) => setDocPath(e.target.value)}
+              >
+                <option value="">{DEFAULT_DOC_LABEL}</option>
+                {docPaths.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </label>
             <input
               className="review-summary"
               value={summary}

@@ -37,6 +37,15 @@ def _entry_out(entry: ScratchEntry) -> dict:
         "routing_state": entry.routing_state,
         "created_at": entry.created_at.isoformat(),
         "routed_at": entry.routed_at.isoformat() if entry.routed_at else None,
+        # Where a kept note landed (goal 9): the hierarchy path (null = default Doc)
+        # for the RECENT chip's hover, and a direct link to the Doc (its newest
+        # entry is at the top, so no per-entry anchor is needed).
+        "routed_doc_path": entry.routed_doc_path,
+        "routed_doc_url": (
+            f"https://docs.google.com/document/d/{entry.routed_doc_id}/edit"
+            if entry.routed_doc_id
+            else None
+        ),
     }
 
 

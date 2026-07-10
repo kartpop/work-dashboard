@@ -39,9 +39,15 @@ due_date (resolve relative dates to YYYY-MM-DD in IST using TODAY below; else nu
 "tomorrow" = TODAY + 1 day; "day after" / "day after tomorrow" = TODAY + 2 days; also handle \
 named weekdays like "friday" and "next monday"), notes (any trailing detail; else null).
 - "note": a thought to remember, not an action ("remember the Vsauce video on entropy", \
-"idea: a CLI for X"). Extract: note_text (the cleaned thought), and summary (a single \
-short phrase — a few words — capturing the note's essence, like a headline; NOT a rewrite \
-of the note, NOT a full sentence).
+"idea: a CLI for X"). Extract:
+  - note_text: the note body with ONLY the routing prefix stripped (see FILING below). \
+Everything else is preserved **VERBATIM** — do NOT reword, summarize, or drop a single \
+word. If there is no routing prefix, note_text is the raw text unchanged.
+  - summary: a single short phrase (a few words) capturing the note's essence, like a \
+headline; NOT a rewrite of the note, NOT a full sentence.
+  - target_doc_path: which Doc in the user's hierarchy (FILING below) this note belongs \
+to; null if none fits.
+  - keywords: a few keywords, OPTIONAL — only when natural ones exist; omit otherwise.
 - "event": something with other people at a specific time ("lunch with Tejas thursday 1pm", \
 "standup moved to 10"). Extract: title, event_datetime (free text), attendees (free text).
 - "unknown": genuinely ambiguous or unclassifiable input.
@@ -58,15 +64,44 @@ def _today_ist() -> str:
     return datetime.now(_IST).date().isoformat()
 
 
-async def classify(text: str) -> RouterClassification:
-    """Classify one captured entry. Returns `unknown` on any failure (never raises)."""
+def _filing_section(doc_paths: list[str] | None) -> str:
+    """The dynamic per-user FILING block appended to the system prompt (goal 9).
+
+    Renders the user's notes hierarchy as **paths only** (never Drive ids — the LLM
+    proposes a path; deterministic code maps path → stored id). No hierarchy → note
+    filing collapses to 'always the default Doc'."""
+    if not doc_paths:
+        return (
+            "\n\nFILING (notes): the user has no notes hierarchy yet — always leave "
+            "target_doc_path null (the note goes to the default Doc)."
+        )
+    listed = "\n".join(f"- {p}" for p in doc_paths)
+    return (
+        "\n\nFILING (notes): the user keeps per-topic notes Docs. When destination is "
+        '"note", set target_doc_path to the ONE best-matching path below — by an '
+        "explicit prefix (e.g. 'john growth — …' → conversations/john/growth) OR by "
+        "content inference (e.g. 'discussed comp with john' → conversations/john/"
+        "growth). If a prefix is present, strip ONLY that prefix from note_text and "
+        "keep the rest verbatim. If nothing clearly fits, leave target_doc_path null "
+        "(the note goes to the default Doc). Never invent a path not listed here.\n"
+        f"{listed}"
+    )
+
+
+async def classify(
+    text: str, doc_paths: list[str] | None = None
+) -> RouterClassification:
+    """Classify one captured entry. Returns `unknown` on any failure (never raises).
+
+    `doc_paths` is the user's notes-hierarchy leaf paths (goal 9); it is injected
+    into the system prompt so the LLM can propose a `target_doc_path`."""
     try:
         client = anthropic.AsyncAnthropic()
         user = f"TODAY (IST): {_today_ist()}\n\nCaptured thought:\n{text.strip()}"
         resp = await client.messages.parse(
             model=config.ROUTER_MODEL,
             max_tokens=config.ROUTER_MAX_TOKENS,
-            system=_SYSTEM,
+            system=_SYSTEM + _filing_section(doc_paths),
             messages=[{"role": "user", "content": user}],
             output_format=RouterClassification,
         )

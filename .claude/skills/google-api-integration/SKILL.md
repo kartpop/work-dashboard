@@ -68,9 +68,15 @@ The notes writer added a Docs/Drive client. Conventions specific to it:
   (later requests see earlier edits' index shifts). Inserting at the **top of the body** = index `1`;
   build the block as one `insertText`, then `updateParagraphStyle` ranges over it (heading vs body).
   Indices are UTF-16 offsets — plain ASCII/newlines count as 1.
-- **Insert-only.** This client never calls `files.delete` or a content-overwriting `files.update`;
-  the AST guardrail test (`test_docs_module_write_surface_is_insert_only`) pins that surface. Read a
-  file's parents for the folder-ancestry gate via `files.get(fields="parents")`.
+- **Insert-only body writes.** This client never calls `files.delete` or a content-overwriting
+  `files.update`; the AST guardrail test (`test_docs_module_write_surface_is_insert_only`) pins that
+  surface. Read a file's parents for the folder-ancestry gate via `files.get(fields="parents")`.
+- **Goal 9 additions (still within `drive.file`):** `create_folder` takes an optional `parent_id`
+  (`parents=[parent_id]` when nesting a hierarchy folder, else Drive root) — still `files.create`.
+  `rename_file` is the one **metadata-only** `files.update`, body **exactly `{"name": ...}`** (never
+  content/parents/trashed), **settings-path-only** — the AST test now allows `files().update` but
+  pins it to `_rename_file`, and a unit test pins the body. The `insert_note` entry block grew to
+  H3 → H4 → H5 → body → delimiter but is still a single top-insert `batchUpdate`.
 - Same sync `_fn` / `async def` + `asyncio.to_thread` split as the other client modules.
 
 ## Calendar day window + multi-calendar merge (goal 7b — `app/google/calendar.py`)

@@ -42,13 +42,33 @@ class RouterFields(BaseModel):
         default=None, description="Extra task notes, else null."
     )
     note_text: Optional[str] = Field(
-        default=None, description="Cleaned note body when destination is note."
+        default=None,
+        description=(
+            "For a note: the body with ONLY the routing prefix stripped — everything "
+            "else preserved VERBATIM (no rewording, summarizing, or dropped words). "
+            "No prefix → the raw text unchanged."
+        ),
     )
     summary: Optional[str] = Field(
         default=None,
         description=(
             "For a note: a single short phrase (a few words) capturing the note's "
             "essence — a one-liner headline, NOT a rewrite of the note. Else null."
+        ),
+    )
+    target_doc_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "For a note: the best-matching Doc leaf path from the user's hierarchy "
+            "(e.g. 'conversations/john/growth'), by explicit prefix OR content "
+            "inference. Null when nothing fits — the note goes to the default Doc."
+        ),
+    )
+    keywords: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "For a note: a few extracted keywords, OPTIONAL — when no natural "
+            "keywords exist, omit them (never force it). Else null."
         ),
     )
     event_datetime: Optional[str] = Field(

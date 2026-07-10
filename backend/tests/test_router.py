@@ -114,7 +114,8 @@ def fake_classify(monkeypatch):
 
     holder = {"result": RouterClassification(destination="unknown", confidence=0.0)}
 
-    async def _classify(text: str):
+    async def _classify(text: str, doc_paths=None):
+        holder["doc_paths"] = doc_paths  # let tests assert the injected hierarchy
         return holder["result"]
 
     monkeypatch.setattr("app.router.service.classify", _classify)
@@ -153,8 +154,8 @@ def notes(monkeypatch):
             return [rec["folder_id"]]
         return []
 
-    async def _insert_note(creds, doc_id, heading, body, summary=None):
-        rec["insert"].append((doc_id, heading, body, summary))
+    async def _insert_note(creds, doc_id, heading, body, summary=None, keywords=None):
+        rec["insert"].append((doc_id, heading, body, summary, keywords))
 
     monkeypatch.setattr("app.google.docs.create_folder", _create_folder)
     monkeypatch.setattr("app.google.docs.create_doc_in_folder", _create_doc_in_folder)
@@ -270,11 +271,12 @@ def test_task_routing_leaves_entry_unrouted_when_no_pinned_lists(
 def test_high_conf_note_bootstraps_doc_and_writes_verbatim(
     session, user_a, google, fake_classify, notes
 ):
-    """Goal 8: with no notes Doc yet, the router bootstraps the user's own folder+Doc
-    (`ensure_notes_target`), then writes exactly one verbatim Docs insert under an H3
-    timestamp — no task write. Replaces the old NOTES_DOC_ID-unset kept-local test."""
-    _set(fake_classify, "note", 0.95, note_text="cleaned — but body must be verbatim")
+    """Goal 8/9: with no notes Doc yet, the router bootstraps the user's own folder+Doc
+    (`ensure_notes_target`), then writes exactly one Docs insert under an H3 timestamp
+    — no task write. The body is the prefix-stripped `note_text` (here, no prefix, so
+    it equals the raw verbatim capture)."""
     body = "- strategy idea\n  - sub point\n- another line"
+    _set(fake_classify, "note", 0.95, note_text=body)
     state = run(
         router_svc.route_entry(
             session, user_a, DummyCreds(), _entry(session, user_a, body)
@@ -282,7 +284,7 @@ def test_high_conf_note_bootstraps_doc_and_writes_verbatim(
     )
     assert state == KEPT_NOTE
     assert len(notes["insert"]) == 1
-    doc_id, heading, written, _summary = notes["insert"][0]
+    doc_id, heading, written, _summary, _kw = notes["insert"][0]
     assert doc_id == notes["doc_id"]  # the app-bootstrapped Doc
     assert written == body  # verbatim — bullets/indentation preserved
     assert heading.endswith("IST")
@@ -314,7 +316,7 @@ def test_note_docs_failure_leaves_entry_unrouted(
     """A Docs write failure surfaces (never swallowed) and leaves the entry
     re-routable — route-once marks routed only on a successful append."""
 
-    async def _boom(creds, doc_id, heading, body, summary=None):
+    async def _boom(creds, doc_id, heading, body, summary=None, keywords=None):
         raise RuntimeError("docs down")
 
     monkeypatch.setattr("app.google.docs.insert_note", _boom)
@@ -439,11 +441,26 @@ def test_router_write_dependency_set_is_insert_only():
     assert called == {"create_task", "reschedule", "append_note"}, called
 
 
+def _calls_in_function(mod, fn_name: str) -> set[str]:
+    """Method names called (obj.method(...)) inside a single function of a module."""
+    tree = ast.parse(inspect.getsource(mod))
+    fn = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name
+    )
+    return {
+        n.func.attr
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+
+
 def test_docs_module_write_surface_is_insert_only():
-    """Statically: the Docs/Drive client never deletes a file or does a
-    content-overwriting `files().update` — the only mutations are the insert-only
-    `documents().batchUpdate` and the sanctioned `files().create` (bootstrap).
-    Drive-access-scoping ADR, layer 5."""
+    """Statically: the Docs/Drive client never deletes a file, and its ONLY
+    `files().update` is the goal-9 metadata rename living in `_rename_file` (never a
+    content overwrite). The other mutations are the insert-only `documents().batchUpdate`
+    and the sanctioned `files().create`. Drive-access-scoping ADR, layer 5."""
     from app.google import docs as docs_mod
 
     tree = ast.parse(inspect.getsource(docs_mod))
@@ -453,9 +470,46 @@ def test_docs_module_write_surface_is_insert_only():
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     }
     assert "delete" not in called_methods, called_methods
-    assert "update" not in called_methods, called_methods  # no files().update overwrite
     assert "batchUpdate" in called_methods  # the insert-only note write
     assert "create" in called_methods  # the sanctioned file-create (bootstrap)
+    # `update` may appear now — but ONLY inside `_rename_file` (metadata rename).
+    assert "update" in _calls_in_function(docs_mod, "_rename_file")
+    for other in ("_insert_note", "_create_folder", "_create_doc_in_folder"):
+        assert "update" not in _calls_in_function(docs_mod, other), other
+
+
+def test_rename_file_body_is_name_only(monkeypatch):
+    """The rename request body is EXACTLY `{"name": ...}` — never content, parents,
+    or trashed (goal 9 pinned unit test)."""
+    from app.google import docs as docs_mod
+
+    captured: dict = {}
+
+    class FakeFiles:
+        def update(self, fileId, body, fields):
+            captured["fileId"] = fileId
+            captured["body"] = body
+            return self
+
+        def execute(self):
+            return {"id": captured["fileId"]}
+
+    class FakeDrive:
+        def files(self):
+            return FakeFiles()
+
+    monkeypatch.setattr(docs_mod, "_drive_service", lambda _creds: FakeDrive())
+    run(docs_mod.rename_file(DummyCreds(), "FILE-1", "New Name"))
+    assert captured["fileId"] == "FILE-1"
+    assert captured["body"] == {"name": "New Name"}
+
+
+def test_router_never_reaches_rename_file():
+    """The metadata rename is a settings-path-only caller — the router service never
+    references `rename_file` (goal 9; keeps the router's mutation surface exactly the
+    insert-only set)."""
+    src = inspect.getsource(router_svc)
+    assert "rename_file" not in src
 
 
 # ── Write-failure leaves the entry re-routable ────────────────────────────────
@@ -677,6 +731,9 @@ def test_eval_score_perfect_passes():
                     "title": c["text"],
                     "due_date": "2026-06-20" if c.get("expects_due") else None,
                     "target_list": c.get("target_list"),
+                    # A perfect run also nails the goal-9 doc-path + prefix strip.
+                    "target_doc_path": c.get("doc_path_expect") or None,
+                    "note_text": c.get("strip_expect"),
                 },
                 "case": c,
             }
@@ -703,6 +760,33 @@ def test_eval_score_catches_task_false_positive():
     ]
     card = score(results)
     assert card["task_false_positives"] == 1
+    assert card["passed"] is False
+
+
+def test_eval_score_doc_path_gate_fails_below_threshold():
+    """Goal 9: mostly-wrong doc-path routing on the clear hierarchy subset fails the
+    gate even when destination accuracy is perfect."""
+    from app.router.evals.runner import score
+
+    results = [
+        {
+            "text": f"john growth note {i}",
+            "expected": "note",
+            "ambiguous": False,
+            "predicted": "note",
+            "confidence": 0.95,
+            # Every one mis-routes to the wrong Doc.
+            "fields": {"target_doc_path": "ideas"},
+            "case": {
+                "text": f"john growth note {i}",
+                "destination": "note",
+                "doc_path_expect": "conversations/john/growth",
+            },
+        }
+        for i in range(5)
+    ]
+    card = score(results)
+    assert card["doc_path_accuracy"] == 0.0
     assert card["passed"] is False
 
 
@@ -793,34 +877,60 @@ def _capture_batchupdate(monkeypatch):
     return captured
 
 
-def test_insert_note_with_summary_bold_one_liner(monkeypatch):
-    """Goal 7c entry shape: H3 timestamp → bold one-liner → verbatim body →
-    delimiter. The one-liner is a bold (updateTextStyle) NORMAL_TEXT paragraph."""
+def _para_styles(reqs):
+    """Ordered (namedStyleType) of every updateParagraphStyle request."""
+    return [
+        r["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"]
+        for r in reqs
+        if "updateParagraphStyle" in r
+    ]
+
+
+def test_insert_note_h3_h4_h5_full_shape(monkeypatch):
+    """Goal 9 entry shape: H3 one-liner → H4 timestamp → H5 keywords → verbatim
+    body → delimiter, in order. Named heading styles replace the goal-7c bold line;
+    no updateTextStyle bolding anymore."""
     from app.google import docs as docs_mod
 
     captured = _capture_batchupdate(monkeypatch)
     run(
         docs_mod.insert_note(
-            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "- a\n- b", "milk + eggs"
+            DummyCreds(),
+            "DOC",
+            "6-July-2026, 8:41 PM IST",
+            "- a\n- b",
+            "milk + eggs",
+            ["milk", "eggs"],
         )
     )
     reqs = captured["requests"]
     text = reqs[0]["insertText"]["text"]
-    # timestamp, then the one-liner on its own line, then the verbatim body.
-    assert text.startswith("6-July-2026, 8:41 PM IST\nmilk + eggs\n")
+    # one-liner headline, timestamp, keyword line, verbatim body, then delimiter.
+    assert text.startswith("milk + eggs\n6-July-2026, 8:41 PM IST\nmilk, eggs\n")
     assert text.endswith("- a\n- b\n\n")
-    # exactly one bold text-style request — the one-liner.
-    bold = [
-        r
-        for r in reqs
-        if "updateTextStyle" in r and r["updateTextStyle"]["textStyle"].get("bold")
-    ]
-    assert len(bold) == 1
-    # the bold range starts right after the heading paragraph.
-    heading_end = 1 + len("6-July-2026, 8:41 PM IST") + 1
-    assert bold[0]["updateTextStyle"]["range"]["startIndex"] == heading_end
-    # delimiter still present.
+    # Named styles: H3 (one-liner) → H4 (timestamp) → H5 → body → delimiter (NORMAL).
+    styles = _para_styles(reqs)
+    assert styles[:4] == ["HEADING_3", "HEADING_4", "HEADING_5", "NORMAL_TEXT"]
+    # No bold text-style requests in the goal-9 shape.
+    assert not any("updateTextStyle" in r for r in reqs)
     assert "borderBottom" in reqs[-1]["updateParagraphStyle"]["paragraphStyle"]
+
+
+def test_insert_note_summary_no_keywords_skips_h5(monkeypatch):
+    """A one-liner but no keywords → H3 one-liner → H4 timestamp → body → delimiter."""
+    from app.google import docs as docs_mod
+
+    captured = _capture_batchupdate(monkeypatch)
+    run(
+        docs_mod.insert_note(
+            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "- a", "one liner", []
+        )
+    )
+    reqs = captured["requests"]
+    assert (
+        reqs[0]["insertText"]["text"] == "one liner\n6-July-2026, 8:41 PM IST\n- a\n\n"
+    )
+    assert _para_styles(reqs)[:3] == ["HEADING_3", "HEADING_4", "NORMAL_TEXT"]
 
 
 def test_insert_note_empty_summary_degrades_to_g7_shape(monkeypatch):
@@ -850,8 +960,8 @@ def test_auto_route_note_passes_summary_through(
         )
     )
     assert state == KEPT_NOTE
-    doc_id, heading, body, summary = notes["insert"][0]
-    assert body == "raw verbatim text"  # raw stays verbatim
+    doc_id, heading, body, summary, _kw = notes["insert"][0]
+    assert body == "raw verbatim text"  # note_text "x" too short → raw wins (guard)
     assert summary == "entropy video"  # the LLM one-liner rides alongside
 
 
@@ -900,7 +1010,7 @@ def test_confirm_as_note_uses_edited_body_and_one_liner(
         )
     )
     assert res["entry_state"] == KEPT_NOTE
-    _doc, _heading, body, summary = notes["insert"][0]
+    _doc, _heading, body, summary, _kw = notes["insert"][0]
     assert body == "cleaned body"  # the edit, not the raw capture
     assert summary == "a headline"
 

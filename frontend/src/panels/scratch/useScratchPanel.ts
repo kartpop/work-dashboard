@@ -7,6 +7,10 @@ export interface ScratchEntry {
   routing_state: string;
   created_at: string;
   routed_at: string | null;
+  // Where a kept note landed (goal 9): the hierarchy path (null = default Doc) for
+  // the chip's hover, and a direct link to the destination Doc.
+  routed_doc_path: string | null;
+  routed_doc_url: string | null;
 }
 
 export interface ReviewFields {
@@ -16,6 +20,8 @@ export interface ReviewFields {
   notes?: string | null;
   note_text?: string | null;
   summary?: string | null;
+  target_doc_path?: string | null;
+  keywords?: string[] | null;
   event_datetime?: string | null;
   attendees?: string | null;
 }
@@ -38,6 +44,23 @@ interface ReviewResponse {
   items: Array<Omit<ReviewItem, "fields"> & { fields: string }>;
 }
 
+// The notes hierarchy (goal 9) — only the leaf Doc paths are needed here, to fill
+// the review queue's destination-Doc dropdown.
+interface NotesIndexNode {
+  name: string;
+  kind: "folder" | "doc";
+  children: NotesIndexNode[];
+}
+function leafPaths(nodes: NotesIndexNode[], prefix: string[] = []): string[] {
+  const out: string[] = [];
+  for (const n of nodes) {
+    const path = [...prefix, n.name];
+    if (n.kind === "doc") out.push(path.join("/"));
+    out.push(...leafPaths(n.children, path));
+  }
+  return out;
+}
+
 // The backend router scheduler routes unrouted captures on its own (~5 min).
 // Poll so those state changes surface without a manual page refresh.
 const POLL_MS = 45_000;
@@ -45,9 +68,18 @@ const POLL_MS = 45_000;
 export function useScratchPanel() {
   const [entries, setEntries] = useState<ScratchEntry[]>([]);
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
+  const [docPaths, setDocPaths] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // The notes-hierarchy leaf paths for the review dropdown — fetched once (the tree
+  // changes only from the settings page, not from routing), never on the poll.
+  useEffect(() => {
+    apiGet<{ nodes: NotesIndexNode[] }>("/settings/notes-index")
+      .then((r) => setDocPaths(leafPaths(r.nodes)))
+      .catch(() => setDocPaths([]));
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -156,6 +188,7 @@ export function useScratchPanel() {
   return {
     entries,
     reviewItems,
+    docPaths,
     isLoading,
     error,
     busy,

@@ -148,3 +148,30 @@ refreshes cleanly after `SCOPES` grows.
   `docs.file_accessible` (a `files().get` **read** — no new mutation surface, AST test unaffected);
   a definite **404** drops the id and re-bootstraps, any other error fails closed (never discards a
   good id), results cached per process (a deploy re-probes each user once). Brief: `goal-8a.md`.
+
+## Goal 9: notes hierarchy (folder/Doc tree + hierarchical routing)
+
+- **`rename_file` — the ONE new sanctioned Drive mutation.** `docs.rename_file(creds, file_id, name)`
+  is a **metadata-only** `files.update` whose body is **exactly `{"name": ...}`** — never content,
+  never `parents` (no add/remove), never `trashed`. It is **settings-path-only** (called from
+  `settings.service._materialize` when a node's name changed) and **never reachable from the router**
+  (AST-asserted). The Docs/Drive AST surface now allows `files().update` but pins it to `_rename_file`
+  alone; a unit test pins the rename body to `{"name": ...}`. Still no `files().delete`, no
+  content-overwriting update, no `addParents`/`removeParents`.
+- **Delete = orphan, always.** Removing a node drops it from the index; the Drive file/folder is
+  **never** deleted or trashed — it stays in the user's Drive, just never written again. Re-adding the
+  same name later creates a **fresh** Doc (no re-attach). Doc→folder conversion = orphan + create.
+- **Eager materialization on save** (`PUT /settings/notes-index`): diff the incoming tree against the
+  stored one **by `node_id`**, apply Drive ops **parent-before-child**, persisting each created/renamed
+  `drive_id` as it succeeds (mirrors `ensure_notes_target`'s folder-before-doc commit). A partial
+  failure persists what succeeded; a retry of the same PUT is idempotent by `node_id`. `create_folder`
+  gained an optional `parent_id` (root notes folder when top-level) — still `files().create`.
+- **`insert_note`'s entry shape is H3 → H4 → H5 → body → delimiter** (goal 9): the LLM one-liner is
+  the **H3** headline, the timestamp the **H4** beneath it (was a bold line), then an optional **H5**
+  keyword line, the verbatim body, and the `borderBottom` delimiter. A missing summary promotes the
+  timestamp back to H3 (no empty headline); empty keywords skip H5. Still ONE insert-only
+  `documents.batchUpdate`, no new Docs method surface. `append_note` grew a `keywords` arg.
+- **Self-heal extends to hierarchy Docs.** `settings.service.resolve_note_target` probes a routed
+  hierarchy Doc with `file_accessible` (cached per `(user_id, drive_id)`); a definite **404**
+  re-creates the Doc **at the same path** (re-creating any missing ancestor folders) and updates the
+  index; any non-404 error fails closed. The default-Doc/root-folder self-heal is unchanged.
