@@ -77,6 +77,48 @@ The `--env-file .env.prod` makes `DASHBOARD_DOMAIN` available to compose (Caddy)
 Writes WAL-safe `.backup` copies under `/data/backups` (on the volume) and prunes to
 `BACKUP_KEEP` (default 14). Off-box copies are intentionally not configured.
 
+## Redeploy (subsequent releases, app already running)
+
+To ship new features/fixes to a host that's already running, rebuild the image
+**in place** — this keeps the `dashboard-data` volume (and every user's notes ids)
+intact per the invariants above. On the EC2 host:
+
+```sh
+cd /home/ubuntu/dashboard          # the checkout from bring-up
+git pull                           # fetch the new code
+docker compose --env-file .env.prod up -d --build
+```
+
+`up -d --build` rebuilds only what changed, recreates the `app` container from the new
+image, and leaves `caddy` and the named volumes untouched. There is **no downtime beyond
+the container restart** (a few seconds). On startup the entrypoint runs `alembic upgrade
+head`, so any new migrations apply automatically — no manual migration step.
+
+Notes on specific changes:
+
+- **Frontend-only changes** still need `--build`: the SPA is baked into the image at build
+  time, not mounted.
+- **`.env.prod` / secrets changed?** `up -d` recreates the container with the new env; no
+  rebuild needed for env-only changes, but running `--build` is harmless.
+- **`client_secret.json` rotated?** Only the client **secret** may change — never the
+  **client id** (see the invariants above). It's mounted read-only, so replace the file on
+  the host and `docker compose --env-file .env.prod up -d` to pick it up.
+- **Never** use `docker compose down -v` — the `-v` deletes the data volume and every user
+  re-bootstraps a fresh folder/Doc. Plain `down` (no `-v`) is safe but unnecessary; `up -d
+  --build` recreates in place.
+
+Roll back by checking out the previous commit/tag and re-running the same `up -d --build`.
+Down migrations are not part of the flow — a rollback that spans a schema change needs a
+restore from `/data/backups` (see the cron above).
+
+### Verify the release
+
+```sh
+docker compose --env-file .env.prod ps           # app + caddy both Up
+docker compose --env-file .env.prod logs -f app  # watch alembic + uvicorn start
+curl -fsSI https://$DASHBOARD_DOMAIN/            # 200 + serves the SPA; then sign in
+```
+
 ## Local dev (unchanged flow, web OAuth)
 
 Local dev uses the **same web OAuth client** with a second redirect URI:
