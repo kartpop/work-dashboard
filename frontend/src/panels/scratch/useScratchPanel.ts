@@ -7,6 +7,10 @@ export interface ScratchEntry {
   routing_state: string;
   created_at: string;
   routed_at: string | null;
+  // Where a kept note landed (goal 9): the hierarchy path (null = default Doc) for
+  // the chip's hover, and a direct link to the destination Doc.
+  routed_doc_path: string | null;
+  routed_doc_url: string | null;
 }
 
 export interface ReviewFields {
@@ -16,8 +20,19 @@ export interface ReviewFields {
   notes?: string | null;
   note_text?: string | null;
   summary?: string | null;
+  target_doc_path?: string | null;
+  keywords?: string[] | null;
   event_datetime?: string | null;
   attendees?: string | null;
+}
+
+// The classifier's proposal (goal 5) — obtained ahead of the write via
+// POST /scratch/classify during the capture undo window, then handed back to
+// POST /scratch on commit so routing doesn't run the LLM a second time.
+export interface RouterClassification {
+  destination: string;
+  confidence: number;
+  fields: ReviewFields;
 }
 
 export interface ReviewItem {
@@ -38,6 +53,23 @@ interface ReviewResponse {
   items: Array<Omit<ReviewItem, "fields"> & { fields: string }>;
 }
 
+// The notes hierarchy (goal 9) — only the leaf Doc paths are needed here, to fill
+// the review queue's destination-Doc dropdown.
+interface NotesIndexNode {
+  name: string;
+  kind: "folder" | "doc";
+  children: NotesIndexNode[];
+}
+function leafPaths(nodes: NotesIndexNode[], prefix: string[] = []): string[] {
+  const out: string[] = [];
+  for (const n of nodes) {
+    const path = [...prefix, n.name];
+    if (n.kind === "doc") out.push(path.join("/"));
+    out.push(...leafPaths(n.children, path));
+  }
+  return out;
+}
+
 // The backend router scheduler routes unrouted captures on its own (~5 min).
 // Poll so those state changes surface without a manual page refresh.
 const POLL_MS = 45_000;
@@ -45,9 +77,18 @@ const POLL_MS = 45_000;
 export function useScratchPanel() {
   const [entries, setEntries] = useState<ScratchEntry[]>([]);
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
+  const [docPaths, setDocPaths] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // The notes-hierarchy leaf paths for the review dropdown — fetched once (the tree
+  // changes only from the settings page, not from routing), never on the poll.
+  useEffect(() => {
+    apiGet<{ nodes: NotesIndexNode[] }>("/settings/notes-index")
+      .then((r) => setDocPaths(leafPaths(r.nodes)))
+      .catch(() => setDocPaths([]));
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -88,17 +129,44 @@ export function useScratchPanel() {
     return () => window.clearInterval(id);
   }, [load]);
 
+  // Classify a capture ahead of the write (no persistence, no Google write) so the
+  // LLM runs during the undo window instead of after it. Returns null if the call
+  // fails — the caller then commits without it and the backend classifies inline.
+  const classify = useCallback(
+    async (text: string): Promise<RouterClassification | null> => {
+      const trimmed = text.trim();
+      if (!trimmed) return null;
+      return apiPost<RouterClassification>("/scratch/classify", {
+        text: trimmed,
+      });
+    },
+    [],
+  );
+
   // Append a capture. The POST now routes inline (goal 7c), so the response
-  // carries the routed state — prepend it as-is (RECENT shows it filed). Returns
-  // the created entry so the caller can refresh the Tasks panel on a routed task.
+  // carries the routed state — prepend it as-is (RECENT shows it filed). A
+  // pre-computed `classification` (from `classify`, run during the undo window) is
+  // passed through so routing skips a second LLM call. Returns the created entry so
+  // the caller can refresh the Tasks panel on a routed task.
   const capture = useCallback(
-    async (text: string): Promise<ScratchEntry | null> => {
+    async (
+      text: string,
+      classification?: RouterClassification | null,
+    ): Promise<ScratchEntry | null> => {
       const trimmed = text.trim();
       if (!trimmed) return null;
       const created = await apiPost<ScratchEntry>("/scratch", {
         text: trimmed,
+        classification: classification ?? null,
       });
-      setEntries((prev) => [created, ...prev]);
+      // Dedupe by id: a poll can observe (and full-list-replace with) the entry in
+      // its brief committed-but-still-routing state, so filter any stale copy before
+      // prepending the routed one — otherwise the same entry renders twice (an
+      // "Unrouted" ghost beside the routed row) until the next poll reconciles.
+      setEntries((prev) => [
+        created,
+        ...prev.filter((e) => e.id !== created.id),
+      ]);
       // When the router sends the capture to review, RECENT shows it "In review"
       // immediately (from `created`) but the Review queue only knows on the next
       // poll — refetch so both surfaces update together (no 45s lag).
@@ -156,9 +224,11 @@ export function useScratchPanel() {
   return {
     entries,
     reviewItems,
+    docPaths,
     isLoading,
     error,
     busy,
+    classify,
     capture,
     routeNow,
     confirmItem,

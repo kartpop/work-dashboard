@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut } from "../api";
 import type { Me } from "../auth/useAuth";
+import { NotesHierarchy } from "./NotesHierarchy";
 
 interface CalendarOption {
   id: string;
@@ -189,6 +190,8 @@ export function SettingsPage({
             </p>
           )}
         </section>
+
+        <NotesHierarchy />
 
         {user.is_superuser && <AllowedEmails />}
       </div>

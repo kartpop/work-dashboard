@@ -23,7 +23,7 @@ from app.db import get_session
 from app.errors import ApiError
 from app.router import service as router_svc
 from app.router.models import PENDING, ReviewItem, ScratchEntry
-from app.router.schema import RouterFields
+from app.router.schema import RouterClassification, RouterFields
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +37,50 @@ def _entry_out(entry: ScratchEntry) -> dict:
         "routing_state": entry.routing_state,
         "created_at": entry.created_at.isoformat(),
         "routed_at": entry.routed_at.isoformat() if entry.routed_at else None,
+        # Where a kept note landed (goal 9): the hierarchy path (null = default Doc)
+        # for the RECENT chip's hover, and a direct link to the Doc (its newest
+        # entry is at the top, so no per-entry anchor is needed).
+        "routed_doc_path": entry.routed_doc_path,
+        "routed_doc_url": (
+            f"https://docs.google.com/document/d/{entry.routed_doc_id}/edit"
+            if entry.routed_doc_id
+            else None
+        ),
     }
 
 
 class CaptureRequest(BaseModel):
     text: str
+    # A classification the client already obtained from POST /scratch/classify during
+    # the capture undo window — reused here so the LLM call is not repeated inline
+    # (the classifier latency hid behind the toast). Omit to classify inline as before.
+    classification: Optional[RouterClassification] = None
+
+
+class ClassifyRequest(BaseModel):
+    text: str
+
+
+@router.post("/scratch/classify")
+async def classify_capture(
+    body: ClassifyRequest,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Classify a capture without persisting or writing anything (goal 9).
+
+    Pure, side-effect-free LLM call: the capture UI fires this the instant a capture
+    is queued, so the classifier runs *during* the ~5s undo window rather than after
+    it — the LLM latency hides behind the toast. On undo the client simply discards
+    the result (nothing was written). On commit it POSTs the classification back to
+    /scratch so routing skips a second LLM call. Needs no Google creds (the
+    classifier only calls Anthropic).
+    """
+    text = body.text.strip()
+    if not text:
+        raise ApiError(400, "empty_capture", "Capture text must not be empty.")
+    classification = await router_svc.classify_text(session, user.id, text)
+    return classification.model_dump()
 
 
 @router.post("/scratch", status_code=201)
@@ -58,6 +97,9 @@ async def capture(
     the response carries the routed state — RECENT renders it filed immediately, no
     scheduler tick. A classifier/Google failure leaves the entry UNROUTED and still
     returns 2xx (capture succeeded); the scheduler backstop retries the filing.
+
+    When the client passes a `classification` (pre-computed via /scratch/classify
+    during the undo window), routing reuses it instead of calling the LLM again.
     """
     text = body.text.strip()
     if not text:
@@ -68,7 +110,9 @@ async def capture(
     session.refresh(entry)
 
     try:
-        await router_svc.route_entry(session, user, creds, entry)
+        await router_svc.route_entry(
+            session, user, creds, entry, classification=body.classification
+        )
     except ApiError:
         # A Google/Docs write failed — the entry is already persisted and left
         # UNROUTED (re-routable). Capture is never lost; the backstop retries.

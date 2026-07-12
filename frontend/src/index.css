@@ -927,6 +927,14 @@ h1, h2, h3 {
   color: var(--done);
   white-space: nowrap;
 }
+/* A kept-note badge is a link to its destination Doc (goal 9). */
+.scratch-badge--link {
+  cursor: pointer;
+  text-decoration: none;
+}
+.scratch-badge--link:hover {
+  text-decoration: underline;
+}
 
 /* Filed states read green ("done"); in-review reads amber/red ("needs me").
    The badge is the only colored element on the row — the body stays neutral. */
@@ -1958,6 +1966,58 @@ h1, h2, h3 {
 .settings-links a {
   color: #1a73e8;
   font-size: 14px;
+}
+
+/* Notes-hierarchy tree widget (goal 9) */
+.notes-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.notes-tree .notes-tree {
+  margin-left: 18px;
+  border-left: 1px solid var(--border);
+  padding-left: 8px;
+}
+.notes-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+.notes-tree-kind {
+  font-size: 13px;
+}
+.notes-tree-name {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+.notes-tree-link {
+  color: #1a73e8;
+  text-decoration: none;
+  font-size: 13px;
+}
+.notes-tree-actions {
+  display: flex;
+  gap: 4px;
+}
+.notes-tree-actions button {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--muted-bg);
+  color: var(--text-h);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 6px;
+}
+.notes-tree-del {
+  color: #b3261e;
 }
 .settings-allow-list li {
   display: flex;

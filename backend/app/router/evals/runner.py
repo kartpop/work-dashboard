@@ -30,6 +30,17 @@ from app.router.classifier import classify
 _CASES = Path(__file__).with_name("cases.jsonl")
 _CLASSES = ("task", "note", "event", "unknown")
 
+# A fixture notes hierarchy injected for eval runs (goal 9): the classifier sees
+# these leaf paths so `target_doc_path` proposals can be graded. Cases reference
+# them via `doc_path_expect` ("" = the default Doc).
+FIXTURE_DOC_PATHS = [
+    "conversations/john/growth",
+    "conversations/john/progression",
+    "conversations/jane",
+    "ideas",
+    "reading",
+]
+
 
 def load_cases(path: Path = _CASES) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
@@ -42,10 +53,13 @@ def shard(cases: list[dict], spec: str) -> list[dict]:
 
 
 async def classify_cases(cases: list[dict]) -> list[dict]:
-    """Run the router over cases → per-case result rows (network: the runtime LLM)."""
+    """Run the router over cases → per-case result rows (network: the runtime LLM).
+
+    The fixture hierarchy (goal 9) is injected into every call so the classifier can
+    propose a `target_doc_path`; non-hierarchy cases should still leave it null."""
     results = []
     for case in cases:
-        c = await classify(case["text"])
+        c = await classify(case["text"], FIXTURE_DOC_PATHS)
         results.append(
             {
                 "text": case["text"],
@@ -74,6 +88,26 @@ def _field_check(case: dict, fields: dict) -> bool | None:
     if not checks:
         return None
     return all(checks)
+
+
+def _doc_path_check(case: dict, fields: dict) -> bool | None:
+    """Did the note route to the expected Doc path? None when unlabelled.
+
+    `doc_path_expect` "" (or absent value) means the default Doc → predicted path
+    must be null/empty. Case-insensitive exact match otherwise (goal 9)."""
+    if "doc_path_expect" not in case:
+        return None
+    want = (case["doc_path_expect"] or "").strip().lower()
+    got = (fields.get("target_doc_path") or "").strip().lower()
+    return want == got
+
+
+def _strip_check(case: dict, fields: dict) -> bool | None:
+    """Prefix-stripping fidelity: note_text == raw minus prefix (goal 9). None when
+    unlabelled. Compared verbatim after trimming surrounding whitespace only."""
+    if "strip_expect" not in case:
+        return None
+    return (fields.get("note_text") or "").strip() == case["strip_expect"].strip()
 
 
 def score(results: list[dict], threshold: float = config.CONFIDENCE_THRESHOLD) -> dict:
@@ -136,12 +170,33 @@ def score(results: list[dict], threshold: float = config.CONFIDENCE_THRESHOLD) -
     ]
     field_graded = [x for x in field_results if x is not None]
 
+    # Doc-path routing (goal 9): graded on the CLEAR hierarchy subset only.
+    doc_path_graded = [
+        _doc_path_check(r["case"], r["fields"])
+        for r in results
+        if "case" in r and not r["ambiguous"]
+    ]
+    doc_path_graded = [x for x in doc_path_graded if x is not None]
+    doc_path_accuracy = (
+        (sum(doc_path_graded) / len(doc_path_graded)) if doc_path_graded else None
+    )
+
+    # Prefix-stripping fidelity (goal 9): note_text == raw minus prefix (spot metric).
+    strip_graded = [
+        _strip_check(r["case"], r["fields"])
+        for r in results
+        if "case" in r and not r["ambiguous"]
+    ]
+    strip_graded = [x for x in strip_graded if x is not None]
+
     clear_accuracy = (clear_correct / len(clear)) if clear else None
     passed = (
         clear_accuracy is not None
         and clear_accuracy >= 0.90
         and task_false_positives == 0
         and ambiguous_auto_written == 0
+        # Doc-path threshold: ≥ 0.9 when the hierarchy subset is present.
+        and (doc_path_accuracy is None or doc_path_accuracy >= 0.90)
     )
 
     return {
@@ -162,6 +217,11 @@ def score(results: list[dict], threshold: float = config.CONFIDENCE_THRESHOLD) -
             "ambiguous_below_threshold": f"{ambiguous_below}/{len(ambiguous)}",
         },
         "field_extraction": f"{sum(field_graded)}/{len(field_graded)}",
+        "doc_path_accuracy": round(doc_path_accuracy, 3)
+        if doc_path_accuracy is not None
+        else None,
+        "doc_path_graded": f"{sum(doc_path_graded)}/{len(doc_path_graded)}",
+        "prefix_strip_fidelity": f"{sum(strip_graded)}/{len(strip_graded)}",
         "task_false_positives": task_false_positives,
         "ambiguous_auto_written": ambiguous_auto_written,
         "threshold": threshold,

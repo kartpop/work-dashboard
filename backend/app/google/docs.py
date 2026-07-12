@@ -8,9 +8,11 @@ same sync `_fn` / `async def` + `asyncio.to_thread` split as the other clients.
 **Scope is `drive.file` only** (ADR: docs/goals/architecture/drive-access-scoping.md).
 Google enforces that the token can touch only files the app created, so the sole
 create path (`create_doc_in_folder`) hard-codes `parents=[folder_id]` — every doc the
-app can ever reach lives under that folder. This module NEVER deletes a file, never
-overwrites a doc's contents, and never does a `files.update` content rewrite — the
-insert is the only mutation of an existing doc, and it is insert-only.
+app can ever reach lives under that folder. This module NEVER deletes a file and never
+overwrites a doc's contents — the insert is the only mutation of a doc's *body*, and it
+is insert-only. The one `files.update` here (`rename_file`, goal 9) is **metadata-only**
+(`{"name": ...}` — never content, parents, or trashed) and is called only from the
+settings/rename path (never the router — AST-asserted).
 """
 
 from __future__ import annotations
@@ -19,12 +21,19 @@ import asyncio
 from typing import TYPE_CHECKING
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 if TYPE_CHECKING:
     from google.oauth2.credentials import Credentials
 
 _DOC_MIME = "application/vnd.google-apps.document"
 _FOLDER_MIME = "application/vnd.google-apps.folder"
+
+# When the LLM gives no one-liner, the H3 headline still exists (a placeholder) so
+# the heading levels stay uniform — H3 = one-liner, H4 = timestamp, H5 = keywords —
+# across every note. A future "extract all H4s" search then reliably yields every
+# timestamp without the level shifting per-entry (goal 9).
+_NO_SUMMARY_PLACEHOLDER = "—"
 
 
 def _docs_service(creds: "Credentials"):
@@ -80,95 +89,85 @@ async def file_accessible(creds: "Credentials", file_id: str) -> bool:
 # ── Insert-only note write (Docs batchUpdate) ─────────────────────────────────
 
 
+def _keyword_line(keywords: list[str] | None) -> str:
+    """Render keywords as one comma-separated line, or "" when there are none."""
+    if not keywords:
+        return ""
+    return ", ".join(k.strip() for k in keywords if k and k.strip())
+
+
 def _insert_note(
     creds: "Credentials",
     doc_id: str,
     heading_text: str,
     body_text: str,
     summary_text: str | None = None,
+    keywords: list[str] | None = None,
 ) -> None:
-    """Insert a Heading-3 timestamp + optional one-liner + verbatim body at the TOP.
+    """Insert an H3 one-liner → H4 timestamp → H5 keywords → body → delimiter at the TOP.
 
-    Newest note always lands first. Index 1 is the start of the body; a single
+    Newest note always lands first. Index 1 is the start of the block; a single
     batchUpdate applies its requests sequentially, so the style ranges see the
     just-inserted text. Insert-only — nothing existing is deleted or overwritten.
 
-    Entry shape (goal 7c): H3 timestamp → the LLM one-liner (bold, the ONLY
-    LLM-authored line) → the verbatim raw text → the delimiter. `summary_text`
-    empty/None degrades to the goal-7 shape (heading → body → delimiter), never
-    blocking the write.
+    Entry shape (goal 9): the LLM one-liner is **always the H3** headline, the timestamp
+    **always the H4** beneath it, then optional **H5** keywords (comma-separated), the
+    verbatim body, and the delimiter. The heading levels are **stable per note** — a
+    missing summary uses a placeholder H3 (never promotes the timestamp) so the timestamp
+    stays H4 for **every** entry; empty/missing keywords skip only the (leaf-level) H5.
+    That uniformity is deliberate: a future "extract all H4s" search must reliably yield
+    every timestamp, which only holds if the level never shifts per-entry. Nothing blocks
+    the write.
 
     A trailing empty paragraph is styled as a light-gray delimiter with spacing
     above/below (goal 7a) — the Docs API has no horizontal-rule request, so a
     `borderBottom` on an empty paragraph is the closest insert-only equivalent —
-    so consecutive notes read as separated entries, not a run-on wall. The
-    delimiter also keeps the previously top-most content in its own paragraph.
+    so consecutive notes read as separated entries, not a run-on wall.
     """
     service = _docs_service(creds)
 
-    summary_text = (summary_text or "").strip()
-    # Block: "<heading>\n[<summary>\n]<body>\n\n" — heading, optional one-liner,
-    # body, and a trailing EMPTY paragraph carrying the delimiter styling below.
-    summary_block = f"{summary_text}\n" if summary_text else ""
-    block = f"{heading_text}\n{summary_block}{body_text}\n\n"
-    heading_end = 1 + len(heading_text) + 1  # end index of the heading paragraph
+    summary_text = (summary_text or "").strip() or _NO_SUMMARY_PLACEHOLDER
+    keyword_text = _keyword_line(keywords)
 
-    requests: list[dict] = [
-        {"insertText": {"location": {"index": 1}, "text": block}},
-        {
-            "updateParagraphStyle": {
-                "range": {"startIndex": 1, "endIndex": heading_end},
-                "paragraphStyle": {"namedStyleType": "HEADING_3"},
-                "fields": "namedStyleType",
-            }
-        },
+    # The ordered paragraphs that make up this entry: (text, named-style). The
+    # one-liner is ALWAYS the H3 headline and the timestamp ALWAYS the H4 beneath it —
+    # a blank summary uses a placeholder rather than shifting the timestamp up, so the
+    # heading levels stay uniform for later heading-extraction search. The body is
+    # always present (even if empty); only the H5 keyword line is conditional.
+    lines: list[tuple[str, str]] = [
+        (summary_text, "HEADING_3"),
+        (heading_text, "HEADING_4"),
     ]
+    if keyword_text:
+        lines.append((keyword_text, "HEADING_5"))
+    lines.append((body_text, "NORMAL_TEXT"))
 
-    body_start = heading_end
-    if summary_text:
-        summary_end = heading_end + len(summary_text) + 1
-        # The one-liner is a normal paragraph with BOLD text — visually distinct
-        # from the verbatim raw text below it (goal 7c).
+    # Block: every line + "\n", then a trailing EMPTY paragraph for the delimiter.
+    block = "".join(f"{text}\n" for text, _ in lines) + "\n"
+    requests: list[dict] = [{"insertText": {"location": {"index": 1}, "text": block}}]
+
+    idx = 1  # running start index (body starts at doc index 1)
+    for text, style in lines:
+        end = idx + len(text) + 1
         requests.append(
             {
                 "updateParagraphStyle": {
-                    "range": {"startIndex": heading_end, "endIndex": summary_end},
-                    "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                    "range": {"startIndex": idx, "endIndex": end},
+                    "paragraphStyle": {"namedStyleType": style},
                     "fields": "namedStyleType",
                 }
             }
         )
-        requests.append(
-            {
-                "updateTextStyle": {
-                    "range": {"startIndex": heading_end, "endIndex": summary_end - 1},
-                    "textStyle": {"bold": True},
-                    "fields": "bold",
-                }
-            }
-        )
-        body_start = summary_end
+        idx = end
 
-    body_end = body_start + len(body_text) + 1  # end index of the body paragraph
-    delim_end = body_end + 1  # end index of the empty delimiter paragraph
-
-    if body_text:
-        requests.append(
-            {
-                "updateParagraphStyle": {
-                    "range": {"startIndex": body_start, "endIndex": body_end},
-                    "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
-                    "fields": "namedStyleType",
-                }
-            }
-        )
     # The trailing empty paragraph → a light-gray horizontal delimiter with
     # breathing room, separating this note from the one below. Insert-only: this
     # styles the just-inserted empty paragraph, never any pre-existing content.
+    delim_end = idx + 1
     requests.append(
         {
             "updateParagraphStyle": {
-                "range": {"startIndex": body_end, "endIndex": delim_end},
+                "range": {"startIndex": idx, "endIndex": delim_end},
                 "paragraphStyle": {
                     "namedStyleType": "NORMAL_TEXT",
                     "spaceAbove": {"magnitude": 8, "unit": "PT"},
@@ -200,38 +199,46 @@ async def insert_note(
     heading_text: str,
     body_text: str,
     summary_text: str | None = None,
+    keywords: list[str] | None = None,
 ) -> None:
     """Insert a timestamped note at the top of the configured Doc (insert-only).
 
-    Optional `summary_text` renders as a bold one-liner between the timestamp and
-    the verbatim body (goal 7c) — the only LLM-authored line in the entry.
+    Optional `summary_text` → the H3 one-liner headline (a placeholder when absent, so
+    the timestamp stays H4); optional `keywords` → an H5 line (goal 9). Both are the
+    only LLM-authored lines; the body stays verbatim.
     """
     await asyncio.to_thread(
-        _insert_note, creds, doc_id, heading_text, body_text, summary_text
+        _insert_note, creds, doc_id, heading_text, body_text, summary_text, keywords
     )
 
 
 # ── The sanctioned file-creates (bootstrap only) ──────────────────────────────
 
 
-def _create_folder(creds: "Credentials", name: str) -> str:
-    """Create a folder at the user's Drive root and return its id.
+def _create_folder(
+    creds: "Credentials", name: str, parent_id: str | None = None
+) -> str:
+    """Create a folder and return its id.
 
     Goal 8: each user's notes folder is app-created (`drive.file` can't write into a
-    user-chosen folder). No parent → Drive root; the user may move/rename it later.
+    user-chosen folder). No `parent_id` → Drive root (the root "Dashboard Notes"
+    folder). Goal 9: hierarchy folders pass `parent_id` = their parent folder's id
+    so the whole tree stays under the root notes folder. Still `files.create` — the
+    app's entire reachable set stays app-created.
     """
     service = _drive_service(creds)
-    created = (
-        service.files()
-        .create(body={"name": name, "mimeType": _FOLDER_MIME}, fields="id")
-        .execute()
-    )
+    body: dict = {"name": name, "mimeType": _FOLDER_MIME}
+    if parent_id:
+        body["parents"] = [parent_id]
+    created = service.files().create(body=body, fields="id").execute()
     return created["id"]
 
 
-async def create_folder(creds: "Credentials", name: str) -> str:
-    """Create the notes folder in the user's Drive (bootstrap; returns its id)."""
-    return await asyncio.to_thread(_create_folder, creds, name)
+async def create_folder(
+    creds: "Credentials", name: str, parent_id: str | None = None
+) -> str:
+    """Create a folder (root notes folder, or a hierarchy folder under `parent_id`)."""
+    return await asyncio.to_thread(_create_folder, creds, name, parent_id)
 
 
 def _create_doc_in_folder(creds: "Credentials", title: str, folder_id: str) -> str:
@@ -256,3 +263,24 @@ def _create_doc_in_folder(creds: "Credentials", title: str, folder_id: str) -> s
 async def create_doc_in_folder(creds: "Credentials", title: str, folder_id: str) -> str:
     """Create the notes Doc inside the designated folder (bootstrap; returns its id)."""
     return await asyncio.to_thread(_create_doc_in_folder, creds, title, folder_id)
+
+
+# ── The one sanctioned metadata mutation: rename (goal 9) ─────────────────────
+
+
+def _rename_file(creds: "Credentials", file_id: str, name: str) -> None:
+    """Rename a file/folder — a **metadata-only** `files.update` (goal 9).
+
+    The request body is **exactly `{"name": name}`** — never content, never
+    `parents` (no add/remove), never `trashed`. This is the ONLY `files.update` in
+    the module and is a **settings-path-only** caller (the router never reaches it —
+    AST-asserted), so the Drive name and the routing name never drift. Not a
+    content overwrite; the insert-only note write is untouched.
+    """
+    service = _drive_service(creds)
+    service.files().update(fileId=file_id, body={"name": name}, fields="id").execute()
+
+
+async def rename_file(creds: "Credentials", file_id: str, name: str) -> None:
+    """Rename a Drive file/folder (metadata-only; settings/rename path only)."""
+    await asyncio.to_thread(_rename_file, creds, file_id, name)

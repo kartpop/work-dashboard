@@ -1,60 +1,153 @@
 # Dashboard
 
-A personal, **multi-user** dashboard that surfaces Google Tasks and Calendar alongside a small
-local task-metadata overlay — custom sort, grouping, and a capture-box that auto-files dumped
-thoughts to the right place (tasks, or a per-user notes Doc). Each user signs in with Google and
-gets their own fully-isolated dashboard.
+A personal, **multi-user** productivity dashboard. It pulls your Google Tasks and Calendar onto
+one screen, adds a smarter layer for organizing tasks, and gives you a **scratchpad** that reads
+whatever you dump into it and files it in the right place automatically. Everyone signs in with
+their own Google account and gets a private, fully-isolated dashboard.
 
-- **Backend**: FastAPI (Python). Calls the Google APIs directly — see `backend/app/google/`.
-- **Frontend**: React + Vite. One self-contained panel per surface under `frontend/src/panels/`.
-- **Storage**: SQLite (WAL) for the task-metadata overlay, per-user settings, and auth rows.
-- **Auth (goal 8)**: Google Sign-In = the OAuth grant; per-user refresh tokens stored
-  Fernet-encrypted; a signed session cookie; an email allowlist gates who can sign in.
+---
 
-See `CLAUDE.md` for the repo map and conventions. For the HTTP endpoints and feature details, see
-[docs/api-reference.md](docs/api-reference.md); for deployment, see [docs/deploy.md](docs/deploy.md)
-and [docs/goals/goal-8-owner-steps.md](docs/goals/goal-8-owner-steps.md).
+## What it does
 
-## Prerequisites
+### ✅ Tasks — "My Tasks" and "Follow-ups"
 
-- **Two Google Tasks lists titled exactly `My Tasks` and `Follow-ups`.** The dashboard renders
-  these two lists (and only these two) as its pinned columns, and the scratchpad auto-router files
-  every task into one of them — never any other list. A brand-new Google account already has the
-  default `My Tasks` list; add `Follow-ups` yourself in Google Tasks. **Each user must have both**,
-  or their routed tasks are created but never shown, and captured tasks stay unrouted.
-- A Google Cloud **web** OAuth client secret at `client_secret.json` (repo root). Add both
-  `http://localhost:8010/auth/callback` (dev) and your prod callback as authorized redirect URIs.
-  Enable the Tasks, Calendar, Drive, and Docs APIs; publish the consent screen (unverified is fine).
-- `backend/.env` with:
-  - `SESSION_SECRET` — signs the session cookie.
-  - `TOKEN_ENCRYPTION_KEY` — a Fernet key encrypting refresh tokens at rest
-    (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`).
-  - `SUPERUSER_EMAIL` — your @gmail; bootstraps the superuser (always allowed; edits the invite list).
-  - `ANTHROPIC_API_KEY` — for the scratchpad auto-router (without it, captures fall to the manual
-    review queue; everything else works).
-  - `OAUTH_REDIRECT_URI=http://localhost:8010/auth/callback`, `FRONTEND_ORIGIN=http://localhost:5173`,
-    `COOKIE_SECURE=0` for local http dev.
+Two task lists, backed by **Google Tasks** — so anything you change here syncs straight to Google
+and shows up on your phone.
 
-The `NOTES_FOLDER_ID` / `NOTES_DOC_ID` / `EXTRA_CALENDAR_IDS` env vars are **gone** — the notes
-folder + Doc are app-created per user, and calendars are toggled per user in the Settings panel.
+- **Opinionated on purpose:** the dashboard shows exactly two lists and nothing else —
+  **My Tasks** (your own to-dos) and **Follow-ups** (things you're waiting on or chasing someone
+  else about). You need both lists, named *exactly* `My Tasks` and `Follow-ups`, in your Google
+  Tasks. Every Google account already has `My Tasks`; add `Follow-ups` yourself. (Tasks in any
+  other Google list simply aren't shown.)
+- **Drag to prioritize** — reorder tasks within a day, and drag them across day-buckets or even
+  across the two lists in one motion. Position *is* the priority — there's no separate priority
+  field.
+- **Group related tasks** into named clusters within a day. Ordering and grouping are a local
+  layer on top of Google: Google still sees a plain list, but the dashboard remembers your
+  arrangement.
+- **Due dates** via a date picker or by dragging into a day; overdue tasks roll up into an
+  **Overdue** bucket at the top.
+- **Edit, complete, and delete** tasks inline. No confirm dialogs — a delete gets a ~5-second
+  **Undo** toast instead, and a completion can be undone the same way.
+- **Subtasks aren't supported yet** — they render flat for now (proper nesting comes later).
 
-## Running it (local dev)
+### 📝 Scratchpad — dump a thought, it files itself
 
-### Backend
+A capture box for half-formed thoughts. Whatever you type gets **auto-routed**: an actionable
+to-do becomes a task (in My Tasks or Follow-ups), and a "remember this" note gets appended to one
+of your Google Docs.
+
+- **You define your own notes structure** in **Settings** — a tree of folders and Docs (e.g.
+  `work / conversations / john-doe`). The router reads each note and files it into the
+  best-matching Doc; anything that doesn't clearly fit goes to a default Doc.
+- **Ambiguous captures go to a Review queue** instead of being guessed. You confirm or redirect
+  them with a click — pick the destination Doc, tweak the text, or turn it into a task.
+- **Notes are written verbatim** into your Doc (newest at the top, timestamped, with a one-line
+  summary headline). The app only ever *adds* to your Docs — it never edits or deletes what's
+  already there.
+- **Every capture has a short undo window** — hit Undo and nothing is written anywhere.
+
+### 📅 Calendar — read-only day strip
+
+A compact strip of the day's meetings across the top of the dashboard.
+
+- **Read-only** — add or change events in Google Calendar as usual; the dashboard just displays
+  them (with Meet links and a live "now" marker).
+- **Add multiple calendars** in **Settings** (e.g. a work calendar shared into your account). Your
+  primary Google account needs at least **read** access to any calendar you want shown.
+
+### 👤 Multi-user
+
+Sign in with Google; each person gets their own isolated dashboard — their tasks, notes, settings,
+and an encrypted refresh token, never visible to anyone else. An email allowlist controls who can
+sign in.
+
+---
+
+## Under the hood
+
+- **Backend:** FastAPI (Python). Calls the Google APIs directly (`backend/app/google/`). The only
+  place an LLM runs is the scratchpad router.
+- **Frontend:** React + Vite. One self-contained panel per surface (`frontend/src/panels/`).
+- **Storage:** SQLite (WAL) for the task-metadata overlay (custom order + grouping), per-user
+  settings, and auth rows. Google remains the source of truth for tasks, calendar, and docs.
+- **Auth:** Google Sign-In is the OAuth grant; per-user refresh tokens stored Fernet-encrypted; a
+  signed session cookie; an email allowlist gates who can sign in.
+
+See `CLAUDE.md` for the repo map and conventions, [docs/api-reference.md](docs/api-reference.md)
+for the HTTP endpoints, and [docs/deploy.md](docs/deploy.md) +
+[the owner checklist](docs/goals/goal-8-owner-steps.md) for deployment.
+
+---
+
+## Local dev setup
+
+### 1. Google Tasks lists
+
+Make sure your Google Tasks has two lists titled **exactly** `My Tasks` and `Follow-ups`. A new
+account already has `My Tasks`; add `Follow-ups`. Without both, routed tasks are created but never
+shown, and captured tasks stay unrouted.
+
+### 2. Google Cloud — OAuth web client (`client_secret.json`)
+
+The app signs users in with Google, so you need a Google Cloud OAuth **Web application** client:
+
+- In the [Google Cloud Console](https://console.cloud.google.com/), pick or create a project.
+- **APIs & Services → Enabled APIs:** enable the **Tasks**, **Calendar**, **Drive**, and **Docs**
+  APIs.
+- **OAuth consent screen:** User type **External**. Add exactly these scopes — `openid`,
+  `userinfo.email`, `userinfo.profile`, `tasks`, `calendar.readonly`, `drive.file`. **Do not** add
+  `documents` or full `drive` — the app is `drive.file`-scoped by design (it can only touch files
+  it created; ADR: [drive-access-scoping](docs/goals/architecture/drive-access-scoping.md)). For
+  local dev you can leave publishing status at *Testing* and add yourself as a test user.
+- **Credentials → Create credentials → OAuth client ID → Web application.** Add the redirect URI
+  `http://localhost:8010/auth/callback`. Download the JSON and save it as **`client_secret.json`**
+  at the **repo root** — it must have a top-level `"web"` key (not `"installed"`).
+
+> ⚠️ Once users start filing notes, **don't replace this OAuth client id.** Under `drive.file`,
+> Google keys per-file access to the client id that *created* a file, so a new client id 404s every
+> user's existing notes folder/Doc. Rotating the client *secret* is fine.
+
+Full step-by-step (including cleanup from older single-user setups and a two-user isolation test):
+[docs/goals/goal-8-owner-steps-local.md](docs/goals/goal-8-owner-steps-local.md).
+
+### 3. Backend env (`backend/.env`)
+
+Generate the two secrets:
+
+```sh
+python -c "import secrets; print(secrets.token_urlsafe(48))"                                # SESSION_SECRET
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # TOKEN_ENCRYPTION_KEY
+```
+
+Create `backend/.env` (gitignored — never commit it):
+
+```dotenv
+SESSION_SECRET=<from above>            # signs the session cookie
+TOKEN_ENCRYPTION_KEY=<from above>      # Fernet key encrypting refresh tokens at rest
+SUPERUSER_EMAIL=you@gmail.com          # bootstraps the superuser (always allowed; edits the invite list)
+ANTHROPIC_API_KEY=<your key>           # powers the scratchpad router — without it, captures fall to the
+                                       # review queue and everything else still works
+OAUTH_REDIRECT_URI=http://localhost:8010/auth/callback
+FRONTEND_ORIGIN=http://localhost:5173
+COOKIE_SECURE=0                        # local http dev (the Secure cookie flag breaks on plain http)
+```
+
+The old `NOTES_FOLDER_ID` / `NOTES_DOC_ID` / `EXTRA_CALENDAR_IDS` vars are **gone** — the notes
+folder + Docs are app-created per user from the Settings tree, and calendars are toggled per user.
+
+### 4. Run it
+
+**Backend:**
 
 ```sh
 cd backend
 uv sync
-uv run alembic upgrade head             # run once per schema change (creates overlay.db)
+uv run alembic upgrade head             # run once, and again after any schema change (creates overlay.db)
 uv run uvicorn app.main:app --reload --port 8010
 ```
 
-There is no CLI auth step — sign in through the web flow from the frontend. Each user's encrypted
-token lives in the DB. If Google write calls ever 403 with a scope error, sign out and back in to
-re-grant (Drive access is **`drive.file` only** — never full Drive/Docs; ADR
-`docs/goals/architecture/drive-access-scoping.md`).
-
-### Frontend
+**Frontend:**
 
 ```sh
 cd frontend
@@ -62,8 +155,15 @@ npm install
 npm run dev                             # http://localhost:5173, expects the backend on :8010
 ```
 
-Open `http://localhost:5173`, click **Sign in with Google**, and grant the scopes. `localhost:5173`
-and `localhost:8010` are the same *site*, so the `SameSite=Lax` session cookie flows in dev.
+Open `http://localhost:5173`, click **Sign in with Google**, and grant the scopes. There's no CLI
+auth step — the web sign-in stores each user's encrypted token in the DB. `localhost:5173` and
+`localhost:8010` are the same *site*, so the `SameSite=Lax` session cookie flows in dev. If a Google
+write ever 403s with a scope error, sign out and back in to re-grant.
+
+Then open **Settings** to build your notes hierarchy (and toggle any extra calendars) — the
+scratchpad starts filing captures into it.
+
+---
 
 ## Deploying
 

@@ -86,6 +86,29 @@ choice:
 The plain `documents` or `drive` scopes. If a future feature seems to need them, that is the
 trigger to do Option B instead.
 
+## Addendum (goal 9) — metadata-only rename + orphan-only delete
+
+The user-defined notes hierarchy (goal 9) grows a folder/Doc tree under the app-created notes
+folder, edited from settings. Two decisions extend — not weaken — the stance above:
+
+- **One new sanctioned mutation: metadata-only rename.** `docs.rename_file` is a `files.update`
+  whose body is **exactly `{"name": ...}`** — never content, never `parents`, never `trashed`. It
+  keeps the Drive name in sync with the routing name so they never drift. It is **settings-path-only**
+  (called only from the tree-materialization path) and **never reachable from the router**
+  (AST-asserted, alongside the existing router write-dependency test). The Docs/Drive AST guard now
+  permits `files().update` but **pins it to `_rename_file`**; a unit test pins the body. Layer 1 is
+  untouched: `drive.file` still means Google only lets the token rename files the app created.
+- **Delete is orphan-only — the app never deletes or trashes a Drive file.** Removing a node from the
+  hierarchy drops it from the index; the underlying Drive file/folder is left in the user's Drive and
+  simply never written to again. Re-adding a name later creates a fresh Doc (no re-attach). This keeps
+  the app's Drive-mutation surface free of any `files.delete` forever (still AST-asserted).
+- **New folders/Docs are still app-created** (`files.create`, now with an optional `parent_id` so the
+  tree nests under the root notes folder) — the app's entire reachable file set stays app-created and
+  under the notes folder, so layer 2's ancestry gate still holds for every hierarchy Doc.
+- IDs stay **config-only** (layer 3): the classifier proposes a *path*, deterministic code maps
+  path → stored id; the review dropdown submits paths, server-validated; Drive ids never enter the
+  prompt or a request payload. No new OAuth scope; consent wording unchanged (`drive.file`).
+
 ## Process rule
 
 Any goal that changes auth scopes, tokens, or Google-side setup ships an **owner-steps checklist**

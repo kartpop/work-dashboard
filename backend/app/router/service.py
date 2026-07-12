@@ -44,6 +44,7 @@ from app.router.models import (
     ScratchEntry,
 )
 from app.router.schema import RouterFields
+from app.settings import notes_index
 from app.settings import service as settings_svc
 from app.writes import service as writes_svc
 
@@ -69,33 +70,61 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _guarded_note_body(raw: str, note_text: str | None) -> str:
+    """The body to write: the prefix-stripped `note_text`, guarded (goal 9).
+
+    Truncation guard — a mangled extraction must never silently lose words: if
+    `note_text` is missing, empty, or suspiciously short (< 50% of the raw text's
+    length), fall back to the **raw text verbatim**. Otherwise the stripped text
+    (prefix removed, rest verbatim) wins."""
+    candidate = note_text or ""
+    if not candidate.strip() or len(candidate.strip()) < 0.5 * len(raw.strip()):
+        return raw
+    return candidate
+
+
 async def _dispose_note(
     session: Session,
     creds: "Credentials",
     user_id: int,
     entry: ScratchEntry,
-    text: str | None = None,
-    summary: str | None = None,
+    fields: RouterFields,
+    body_override: str | None = None,
 ) -> str:
-    """Dispose a `note`: write it VERBATIM to the top of the user's notes Doc.
+    """Dispose a `note`: route it to the best-matching hierarchy Doc (goal 9).
 
-    Goal 8: the notes folder + Doc are app-created on first need (`ensure_notes_target`),
-    so a note always has a home in the user's own Drive — no env config, no kept-local
-    default. `text` overrides the raw body (a review edit); `summary` (goal 7c) is the
-    LLM one-liner rendered bold above the raw text. Returns KEPT_NOTE.
+    The body is the prefix-stripped `note_text` under the truncation guard
+    (`_guarded_note_body`); `body_override` (a review edit) wins verbatim. The Doc is
+    resolved deterministically from `fields.target_doc_path` (path → stored id;
+    unknown/null → default Doc), self-healing a 404'd hierarchy Doc at the same path.
+    `entry.routed_doc_path` records where it landed (null = default). `summary` +
+    optional `keywords` are the only LLM-authored lines. Returns KEPT_NOTE.
 
     A Drive/Docs failure raises (entry left re-routable, rollback) so route-once only
     marks the entry routed after a successful append — same contract as the task path.
     """
-    body_text = text if text is not None else entry.text
-    doc_id, folder_id = await settings_svc.ensure_notes_target(session, creds, user_id)
+    body_text = (
+        body_override
+        if body_override is not None
+        else _guarded_note_body(entry.text, fields.note_text)
+    )
+    doc_id, folder_id, canonical = await settings_svc.resolve_note_target(
+        session, creds, user_id, fields.target_doc_path
+    )
     try:
         await writes_svc.append_note(
-            creds, doc_id, folder_id, body_text, summary=summary
+            creds,
+            doc_id,
+            folder_id,
+            body_text,
+            summary=fields.summary,
+            keywords=fields.keywords,
         )
     except ApiError:
         session.rollback()
         raise
+    entry.routed_doc_path = canonical
+    entry.routed_doc_id = doc_id
     return KEPT_NOTE
 
 
@@ -189,20 +218,46 @@ def _new_review_item(
     )
 
 
+async def classify_text(
+    session: Session, user_id: int, text: str
+) -> RouterClassification:
+    """Classify a capture WITHOUT disposing it — a pure, side-effect-free LLM call.
+
+    Split out from `route_entry` so the capture UI can run the (slow) classifier
+    during its undo window (the deferred-write toast) and then commit the already-
+    computed classification when the window lapses — the LLM latency hides behind the
+    toast instead of adding to it. No DB write, no Google write; safe to discard on
+    undo. The user's notes hierarchy is injected so the LLM can propose a doc path.
+    """
+    doc_paths = notes_index.leaf_paths(settings_svc.get_notes_index(session, user_id))
+    return await classify(text, doc_paths)
+
+
 async def route_entry(
-    session: Session, user: "User", creds: "Credentials", entry: ScratchEntry
+    session: Session,
+    user: "User",
+    creds: "Credentials",
+    entry: ScratchEntry,
+    classification: RouterClassification | None = None,
 ) -> str:
     """Classify + dispose one entry for `user`. Returns the resulting routing_state.
 
     Idempotent: if the entry is already routed it is left untouched. A Google-write
     failure in the deterministic step leaves the entry `UNROUTED` (re-routable) and
     raises an `ApiError` — nothing is half-written, the error is never swallowed.
+
+    `classification` lets a caller inject a pre-computed classification (from
+    `classify_text`, run during the capture undo window) so the LLM call is not
+    repeated inline; when omitted the classifier runs here as before. Dispose is
+    deterministic either way — the confidence/schema/destination gates still apply,
+    and a note's Doc still comes from path→id resolution, never from the payload.
     """
     if entry.routing_state != UNROUTED:
         return entry.routing_state
 
     user_id = user.id
-    classification = await classify(entry.text)
+    if classification is None:
+        classification = await classify_text(session, user_id, entry.text)
     entry.route_result = classification.model_dump_json()
     dest = classification.destination
     conf = classification.confidence
@@ -219,7 +274,7 @@ async def route_entry(
         entry.routing_state = ROUTED_TASK
     elif dest == "note" and above:
         entry.routing_state = await _dispose_note(
-            session, creds, user_id, entry, summary=fields.summary
+            session, creds, user_id, entry, fields
         )
     else:
         if dest in ("task", "note"):
@@ -297,16 +352,24 @@ async def confirm_review(
             raise
         entry.routing_state = ROUTED_TASK
     elif dest == "note":
-        # Review edits win: a user-edited note body / one-liner is what lands
-        # (goal 7c). An empty note_text falls back to the verbatim entry text.
+        # The review dropdown only offers real leaves, so a non-null path that
+        # doesn't validate means a stale tree → 422 (goal 9, item 7). Null = default.
+        if eff_fields.target_doc_path:
+            forest = settings_svc.get_notes_index(session, user.id)
+            if notes_index.resolve_path(forest, eff_fields.target_doc_path) is None:
+                raise ApiError(
+                    422, "unknown_doc_path", "That notes Doc no longer exists."
+                )
+        # Review edits win: a user-edited note body / one-liner is what lands. An
+        # empty note_text falls back to the verbatim entry text (bypasses the guard).
         edited = (eff_fields.note_text or "").strip()
         entry.routing_state = await _dispose_note(
             session,
             creds,
             user.id,
             entry,
-            text=edited or None,
-            summary=eff_fields.summary,
+            eff_fields,
+            body_override=edited or entry.text,
         )
     else:
         # event / unknown: acknowledged, no write (calendar read-only v1).

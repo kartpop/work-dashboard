@@ -38,3 +38,11 @@
 {"text": "reflection: the borrow checker is basically library-book loans for memory, worth writing up", "destination": "note"}
 {"text": "the palette thing", "destination": "note", "ambiguous": true}
 {"text": "designer follow-up, maybe", "destination": "task", "ambiguous": true}
+{"text": "john growth — discussed promotion timeline", "destination": "note", "doc_path_expect": "conversations/john/growth", "strip_expect": "discussed promotion timeline"}
+{"text": "conversation john growth: he wants a mentor", "destination": "note", "doc_path_expect": "conversations/john/growth", "strip_expect": "he wants a mentor"}
+{"text": "discussed comp with john during his growth chat", "destination": "note", "doc_path_expect": "conversations/john/growth"}
+{"text": "jane — she is moving to the platform team", "destination": "note", "doc_path_expect": "conversations/jane", "strip_expect": "she is moving to the platform team"}
+{"text": "idea: a CLI that diffs two json trees", "destination": "note", "doc_path_expect": "ideas", "strip_expect": "a CLI that diffs two json trees"}
+{"text": "remember the Vsauce video on entropy", "destination": "note", "doc_path_expect": "", "strip_expect": "remember the Vsauce video on entropy"}
+{"text": "random thought about the weather today", "destination": "note", "doc_path_expect": ""}
+{"text": "john progression: next level is staff eng", "destination": "note", "doc_path_expect": "conversations/john/progression", "strip_expect": "next level is staff eng"}

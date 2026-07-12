@@ -413,6 +413,7 @@ async def append_note(
     folder_id: str | None,
     body_text: str,
     summary: str | None = None,
+    keywords: list[str] | None = None,
 ) -> dict:
     """Append a verbatim note to the top of the configured Doc under an H3 timestamp.
 
@@ -420,14 +421,16 @@ async def append_note(
     ancestry gate runs first (fail-closed); a Docs error is surfaced as an ApiError
     so the entry stays re-routable (route-once marks routed only on success).
 
-    `summary` (goal 7c) is the one LLM-authored line — a bold one-liner inserted
-    between the timestamp and the verbatim `body_text`. The raw text stays verbatim;
-    an empty/missing summary degrades to the goal-7 shape.
+    `summary` (H4 one-liner) and `keywords` (optional H5 line) are the only
+    LLM-authored lines (goal 9); the raw `body_text` stays verbatim. Empty/missing
+    summary or keywords degrade to the earlier shapes.
     """
     await _assert_in_notes_folder(creds, doc_id, folder_id)
     heading = format_note_heading(datetime.now(_IST))
     try:
-        await docs_client.insert_note(creds, doc_id, heading, body_text, summary)
+        await docs_client.insert_note(
+            creds, doc_id, heading, body_text, summary, keywords
+        )
     except ApiError:
         raise
     except Exception as exc:

@@ -47,6 +47,14 @@ under `backend/app/router/`.
 - `service.py` — deterministic dispose: reads the classification, performs/withholds writes,
   persists `routing_state`, builds review items. A Google-write failure leaves the entry `UNROUTED`
   (re-routable) and raises `ApiError` — never swallowed, never half-written.
+  - **Classify/dispose split (goal 9).** `classify_text(session, user_id, text)` is the pure LLM
+    step (no DB write, no Google write); `route_entry(..., classification=None)` disposes it and
+    will **reuse an injected classification** instead of calling the LLM again. This lets the
+    capture UI pre-classify **during the ~5s undo toast** (`POST /scratch/classify` — side-effect
+    free, discarded on undo) and hand the result back on commit, so the classifier latency hides
+    behind the toast instead of stacking after it. Dispose stays deterministic either way — the
+    confidence/schema/destination gates still run and a note's Doc still comes from path→id
+    resolution, **never from the client-relayed payload** (same trust boundary as review-confirm).
 - `scheduler.py` — in-process periodic `route_unrouted` (no Celery). `route-now` calls the same fn.
   **Goal 7c:** capture routes **inline** in `POST /scratch` (`route_entry` runs in the request; the
   response carries the routed state). The scheduler is demoted to a **retry backstop** for entries
@@ -62,6 +70,34 @@ under `backend/app/router/`.
 
 The router runs on a **small/cheap model** (`config.ROUTER_MODEL`, default `claude-haiku-4-5`) — this
 is classification + light extraction, not reasoning. That is a product decision, not a compromise.
+
+## Goal 9: hierarchy-aware note routing
+
+- **Hierarchy in the prompt, path-not-id contract.** The classifier's system prompt gains a
+  **dynamic per-user section** (`classifier._filing_section`): the user's notes hierarchy rendered
+  as **paths only** (e.g. `conversations/john/growth`) plus the default-Doc fallback rule. **Drive
+  ids NEVER enter the prompt and the LLM NEVER emits an id** (ADR layer 3 stands) — it proposes a
+  `target_doc_path`; deterministic code (`settings.service.resolve_note_target`) maps path → stored
+  id (case-insensitive exact leaf match; unknown/null → the default Doc). `route_entry` passes the
+  leaf paths via `classify(text, doc_paths)`.
+- **Doc choice never gates review.** The confidence gate is still about note-vs-task-vs-unknown; a
+  wrong-doc guess is low-stakes (the note is still filed, its path shows in RECENT). Confirm-as-note
+  re-validates a non-null `target_doc_path` against the index (**422** `unknown_doc_path` on a stale
+  path — the dropdown only offers real leaves).
+- **The 2nd verbatim relaxation.** The body written to the Doc is `note_text` — the raw capture with
+  **only the routing prefix stripped**, under an emphatic preserve-verbatim prompt instruction and a
+  deterministic **truncation guard** (`service._guarded_note_body`: a missing/empty/`< 50%`-length
+  `note_text` falls back to the **raw text verbatim** — a mangled extraction never silently loses
+  words). The one-liner (`summary`, the H3 headline) and the optional `keywords` (H5) are the only
+  other LLM-authored lines. The **heading levels are stable per note**: the one-liner is always
+  H3 (a placeholder when absent, so the timestamp is always H4), and only the leaf-level H5
+  keywords skip when absent — a later "extract all H4s" search reliably yields every timestamp.
+- **`routed_doc_path`** (nullable, on `ScratchEntry`) records where a `kept_note` landed (null =
+  default Doc), set on both auto-route and confirm-as-note; `GET /scratch` returns it.
+- Write set unchanged: still exactly `{create_task, reschedule, append_note}` (AST-pinned). The
+  metadata rename (`docs.rename_file`) is **settings-path-only** and never reachable from the router
+  (AST-asserted). Eval gate adds **doc-path accuracy ≥ 0.9** on the clear hierarchy subset; keywords
+  + the one-liner stay un-graded.
 
 ## Goal 8: per-user routing
 

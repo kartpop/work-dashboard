@@ -43,6 +43,14 @@ class ScratchEntry(SQLModel, table=True):
         nullable=False,
     )
     routed_at: Optional[datetime] = Field(default=None)
+    # The hierarchy Doc path a `kept_note` was actually disposed to (goal 9),
+    # e.g. "conversations/john/growth". Null = the default Doc. Set on kept_note
+    # (auto-route + confirm-as-note). Drives the RECENT chip's hover tooltip.
+    routed_doc_path: Optional[str] = Field(default=None)
+    # The Drive id of the Doc the note actually landed in (captured at dispose
+    # time — robust to later renames/deletes). Lets the RECENT chip link straight
+    # to the Doc (its newest entry is at the top, so no per-entry anchor needed).
+    routed_doc_id: Optional[str] = Field(default=None)
 
 
 class ReviewItem(SQLModel, table=True):
