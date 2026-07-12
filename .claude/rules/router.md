@@ -47,6 +47,14 @@ under `backend/app/router/`.
 - `service.py` — deterministic dispose: reads the classification, performs/withholds writes,
   persists `routing_state`, builds review items. A Google-write failure leaves the entry `UNROUTED`
   (re-routable) and raises `ApiError` — never swallowed, never half-written.
+  - **Classify/dispose split (goal 9).** `classify_text(session, user_id, text)` is the pure LLM
+    step (no DB write, no Google write); `route_entry(..., classification=None)` disposes it and
+    will **reuse an injected classification** instead of calling the LLM again. This lets the
+    capture UI pre-classify **during the ~5s undo toast** (`POST /scratch/classify` — side-effect
+    free, discarded on undo) and hand the result back on commit, so the classifier latency hides
+    behind the toast instead of stacking after it. Dispose stays deterministic either way — the
+    confidence/schema/destination gates still run and a note's Doc still comes from path→id
+    resolution, **never from the client-relayed payload** (same trust boundary as review-confirm).
 - `scheduler.py` — in-process periodic `route_unrouted` (no Celery). `route-now` calls the same fn.
   **Goal 7c:** capture routes **inline** in `POST /scratch` (`route_entry` runs in the request; the
   response carries the routed state). The scheduler is demoted to a **retry backstop** for entries

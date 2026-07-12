@@ -381,6 +381,36 @@ def test_route_once_does_not_recreate(session, user_a, google, fake_classify):
     assert google.names().count("insert_task") == 1
 
 
+def test_injected_classification_skips_the_llm(session, user_a, google, fake_classify):
+    """An injected classification (from the capture undo-window pre-classify) is used
+    verbatim and the runtime LLM is NOT called again — dispose stays deterministic."""
+    # The LLM, if consulted, would say "unknown" → review (never a task write).
+    _set(fake_classify, "unknown", 0.0)
+    entry = _entry(session, user_a, "call plumber")
+    injected = RouterClassification(
+        destination="task",
+        confidence=0.95,
+        fields=RouterFields(title="call plumber"),
+    )
+    state = run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), entry, classification=injected
+        )
+    )
+    # Injected proposal won → a task was filed; the "unknown" LLM path was skipped.
+    assert state == ROUTED_TASK
+    assert google.names().count("insert_task") == 1
+    assert "doc_paths" not in fake_classify  # classify() was never awaited
+
+
+def test_classify_text_does_not_dispose(session, user_a, google, fake_classify):
+    """`classify_text` is pure: it returns the proposal and writes nothing."""
+    _set(fake_classify, "task", 0.95, title="buy milk")
+    result = run(router_svc.classify_text(session, user_a.id, "buy milk"))
+    assert result.destination == "task"
+    assert "insert_task" not in google.names()
+
+
 def test_route_unrouted_tally_then_noop(session, user_a, google, fake_classify, notes):
     _set(fake_classify, "note", 0.95, note_text="x")
     for _ in range(3):

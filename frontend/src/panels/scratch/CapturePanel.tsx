@@ -6,7 +6,11 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import type { ReviewFields, ScratchEntry } from "./useScratchPanel";
+import type {
+  ReviewFields,
+  RouterClassification,
+  ScratchEntry,
+} from "./useScratchPanel";
 import { useScratchPanel } from "./useScratchPanel";
 import { ReviewQueue } from "./ReviewPanel";
 import {
@@ -111,11 +115,20 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
   // an unmount can flush without re-firing on every render.
   const [showUndo, setShowUndo] = useState(false);
   const pendingRef = useRef<string | null>(null);
+  // The classifier runs the instant a capture is queued (see `submit`), so the LLM
+  // works through the ~5s undo window rather than after it — the toast hides its
+  // latency. The in-flight proposal rides in a ref alongside the held text; undo
+  // just drops it (the classify call has no side effects), commit hands it to the
+  // POST so routing skips a second LLM call.
+  const pendingClassifyRef =
+    useRef<Promise<RouterClassification | null> | null>(null);
   const timerRef = useRef<number | null>(null);
   const captureFnRef = useRef(scratch.capture);
+  const classifyFnRef = useRef(scratch.classify);
   const onRoutedRef = useRef(onRouted);
   useEffect(() => {
     captureFnRef.current = scratch.capture;
+    classifyFnRef.current = scratch.classify;
     onRoutedRef.current = onRouted;
   });
 
@@ -133,13 +146,18 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
       timerRef.current = null;
     }
     const held = pendingRef.current;
+    const classifyP = pendingClassifyRef.current;
     pendingRef.current = null;
+    pendingClassifyRef.current = null;
     setShowUndo(false);
     if (held === null) return;
     try {
-      // Capture now routes inline (goal 7c) — if it filed a Google task, refresh
-      // the (separately-owned) Tasks panel so it appears without a scheduler tick.
-      const created = await captureFnRef.current(held);
+      // Await the classification kicked off at submit (already done, or nearly, by
+      // now — it ran through the undo window). Its POST then routes inline (goal 7c)
+      // without a second LLM call; if it filed a Google task, refresh the
+      // (separately-owned) Tasks panel so it appears without a scheduler tick.
+      const classification = classifyP ? await classifyP : null;
+      const created = await captureFnRef.current(held, classification);
       setCaptureError(null);
       if (created?.routing_state === "routed_task") onRoutedRef.current?.();
     } catch (err) {
@@ -155,6 +173,10 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
     if (!text.trim()) return;
     void commitPending(); // flush any previous still-held capture first
     pendingRef.current = text;
+    // Kick the classifier off NOW so it runs during the undo window, not after it.
+    // Swallow failures to null — commit then sends no classification and the backend
+    // classifies inline (old behaviour), so a classify hiccup never blocks a capture.
+    pendingClassifyRef.current = classifyFnRef.current(text).catch(() => null);
     setText("");
     setCaptureError(null);
     setShowUndo(true);
@@ -172,6 +194,9 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
     }
     const held = pendingRef.current;
     pendingRef.current = null;
+    // Drop the in-flight classification — it has no side effects, so an unresolved
+    // classify call just gets ignored; nothing was persisted or written.
+    pendingClassifyRef.current = null;
     setShowUndo(false);
     if (held !== null) restoreHeld(held);
   };

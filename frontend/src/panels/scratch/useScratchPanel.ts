@@ -26,6 +26,15 @@ export interface ReviewFields {
   attendees?: string | null;
 }
 
+// The classifier's proposal (goal 5) — obtained ahead of the write via
+// POST /scratch/classify during the capture undo window, then handed back to
+// POST /scratch on commit so routing doesn't run the LLM a second time.
+export interface RouterClassification {
+  destination: string;
+  confidence: number;
+  fields: ReviewFields;
+}
+
 export interface ReviewItem {
   id: number;
   entry_id: number;
@@ -120,17 +129,44 @@ export function useScratchPanel() {
     return () => window.clearInterval(id);
   }, [load]);
 
+  // Classify a capture ahead of the write (no persistence, no Google write) so the
+  // LLM runs during the undo window instead of after it. Returns null if the call
+  // fails — the caller then commits without it and the backend classifies inline.
+  const classify = useCallback(
+    async (text: string): Promise<RouterClassification | null> => {
+      const trimmed = text.trim();
+      if (!trimmed) return null;
+      return apiPost<RouterClassification>("/scratch/classify", {
+        text: trimmed,
+      });
+    },
+    [],
+  );
+
   // Append a capture. The POST now routes inline (goal 7c), so the response
-  // carries the routed state — prepend it as-is (RECENT shows it filed). Returns
-  // the created entry so the caller can refresh the Tasks panel on a routed task.
+  // carries the routed state — prepend it as-is (RECENT shows it filed). A
+  // pre-computed `classification` (from `classify`, run during the undo window) is
+  // passed through so routing skips a second LLM call. Returns the created entry so
+  // the caller can refresh the Tasks panel on a routed task.
   const capture = useCallback(
-    async (text: string): Promise<ScratchEntry | null> => {
+    async (
+      text: string,
+      classification?: RouterClassification | null,
+    ): Promise<ScratchEntry | null> => {
       const trimmed = text.trim();
       if (!trimmed) return null;
       const created = await apiPost<ScratchEntry>("/scratch", {
         text: trimmed,
+        classification: classification ?? null,
       });
-      setEntries((prev) => [created, ...prev]);
+      // Dedupe by id: a poll can observe (and full-list-replace with) the entry in
+      // its brief committed-but-still-routing state, so filter any stale copy before
+      // prepending the routed one — otherwise the same entry renders twice (an
+      // "Unrouted" ghost beside the routed row) until the next poll reconciles.
+      setEntries((prev) => [
+        created,
+        ...prev.filter((e) => e.id !== created.id),
+      ]);
       // When the router sends the capture to review, RECENT shows it "In review"
       // immediately (from `created`) but the Review queue only knows on the next
       // poll — refetch so both surfaces update together (no 45s lag).
@@ -192,6 +228,7 @@ export function useScratchPanel() {
     isLoading,
     error,
     busy,
+    classify,
     capture,
     routeNow,
     confirmItem,

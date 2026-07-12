@@ -218,21 +218,46 @@ def _new_review_item(
     )
 
 
+async def classify_text(
+    session: Session, user_id: int, text: str
+) -> RouterClassification:
+    """Classify a capture WITHOUT disposing it — a pure, side-effect-free LLM call.
+
+    Split out from `route_entry` so the capture UI can run the (slow) classifier
+    during its undo window (the deferred-write toast) and then commit the already-
+    computed classification when the window lapses — the LLM latency hides behind the
+    toast instead of adding to it. No DB write, no Google write; safe to discard on
+    undo. The user's notes hierarchy is injected so the LLM can propose a doc path.
+    """
+    doc_paths = notes_index.leaf_paths(settings_svc.get_notes_index(session, user_id))
+    return await classify(text, doc_paths)
+
+
 async def route_entry(
-    session: Session, user: "User", creds: "Credentials", entry: ScratchEntry
+    session: Session,
+    user: "User",
+    creds: "Credentials",
+    entry: ScratchEntry,
+    classification: RouterClassification | None = None,
 ) -> str:
     """Classify + dispose one entry for `user`. Returns the resulting routing_state.
 
     Idempotent: if the entry is already routed it is left untouched. A Google-write
     failure in the deterministic step leaves the entry `UNROUTED` (re-routable) and
     raises an `ApiError` — nothing is half-written, the error is never swallowed.
+
+    `classification` lets a caller inject a pre-computed classification (from
+    `classify_text`, run during the capture undo window) so the LLM call is not
+    repeated inline; when omitted the classifier runs here as before. Dispose is
+    deterministic either way — the confidence/schema/destination gates still apply,
+    and a note's Doc still comes from path→id resolution, never from the payload.
     """
     if entry.routing_state != UNROUTED:
         return entry.routing_state
 
     user_id = user.id
-    doc_paths = notes_index.leaf_paths(settings_svc.get_notes_index(session, user_id))
-    classification = await classify(entry.text, doc_paths)
+    if classification is None:
+        classification = await classify_text(session, user_id, entry.text)
     entry.route_result = classification.model_dump_json()
     dest = classification.destination
     conf = classification.confidence

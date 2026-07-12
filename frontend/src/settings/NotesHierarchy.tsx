@@ -56,6 +56,11 @@ function addChild(
   });
 }
 
+// The placeholder names a fresh node is born with. When one of these is focused we
+// select it whole, so typing replaces it (else you get "New Docphysics" and have to
+// clear it by hand). A user-renamed node keeps normal cursor-placement on focus.
+const DEFAULT_NAMES = new Set(["New folder", "New Doc"]);
+
 const newNode = (kind: "folder" | "doc"): NoteNode => ({
   node_id: uid(),
   name: kind === "folder" ? "New folder" : "New Doc",
@@ -201,6 +206,9 @@ function NoteRow({
           className="notes-tree-name"
           value={node.name}
           onChange={(e) => onRename(node.node_id, e.target.value)}
+          onFocus={(e) => {
+            if (DEFAULT_NAMES.has(node.name)) e.target.select();
+          }}
           aria-label="Node name"
         />
         {node.drive_url && (
