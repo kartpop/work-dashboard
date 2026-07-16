@@ -99,6 +99,91 @@ is classification + light extraction, not reasoning. That is a product decision,
   (AST-asserted). Eval gate adds **doc-path accuracy ≥ 0.9** on the clear hierarchy subset; keywords
   + the one-liner stay un-graded.
 
+## Goal 10: the routing-header contract (LLM-interpreted, code-enforced)
+
+The first few words of a capture — the segment **before the first `-` or newline** — are
+**order-insensitive routing words** (`task tomorrow …` ≡ `tomorrow task …`): a destination keyword,
+date words, and/or doc-path words. A determinate header **takes precedence over the body**. Neither
+prompt-only nor code-only works alone (prompt-only was exactly the observed failure — an explicit
+`notes daily syncup` header bounced to review with the hierarchy already in the prompt), so:
+
+- **The prompt carries the full contract** (`classifier._SYSTEM`, ROUTING HEADER block): segment
+  definition, order-insensitivity, header-beats-body, worked examples. The LLM owns the
+  **open-vocabulary** parts — free word order, multi-word doc paths (`daily syncup`), named weekdays.
+- **Dispose adds thin deterministic guards for the CLOSED-vocabulary tokens** (`service._parse_header`,
+  applied in both `route_entry` and `confirm_review`):
+  - **Header detection is code:** the segment before the first `-`/newline, capped at ~8 words; longer
+    or absent → no header (goal-9 body inference unchanged).
+  - **Destination keywords force the destination.** `task`/`todo` → forced task; `note`/`notes` →
+    forced note; the confidence gate is bypassed **for destination only** on a forced capture — an
+    explicit keyword is user intent, never a review bounce. Neither/both keywords → the LLM's
+    destination + the gate, as before.
+  - **Unambiguous date words backstop a null date.** `today`/`tomorrow`/`day after (tomorrow)` with a
+    null LLM `due_date` → code resolves it (IST, same `_today_ist` base). Named weekdays stay
+    LLM-resolved, eval-graded. `_create_task_from_fields` takes the parsed header for this.
+  - **Doc-path matching stays the LLM's** (multi-word, fuzzy), validated path→id exactly as today. A
+    **forced note whose fields the LLM didn't produce** (it proposed a task) degrades safe: body = raw
+    minus the header (`_dispose_note(..., degraded=True)`), no summary/keywords, default Doc unless the
+    proposed path validates.
+- **Guarded review-item fields (the un-mangled editor).** `_new_review_item` applies the goal-9
+  truncation guard to `note_text` **at creation** (server-side single source of truth), so the editor
+  prefill and confirm fallback both see the raw capture when the LLM's extraction was missing/short —
+  not the low-confidence extraction it declined to auto-file. The frontend keeps its `?? entry_text`.
+- Write set / scope / schema unchanged. Eval gate grows a **header-contract subset**: keyword headers
+  parse + never bounce to review, and clear relative-date headers resolve a due date. Destination
+  accuracy is graded on the **effective** (post-forcing) destination.
+
+## Goal 10a: two daily-driver bugs the first MOM pastes exposed
+
+**1. The `note_text` echo made the response scale with the input — and ate the other fields.**
+`note_text` is the body echoed back VERBATIM, so a ~10k-char meeting-notes paste costs ~2.5k
+output tokens to answer. Two distinct failures, both fixed by bounding the INPUT:
+- Past `ROUTER_MAX_TOKENS` the JSON truncates, `parsed_output` is None, and the schema gate
+  collapses the **whole** classification to `unknown`/0.0. Observed in production: every capture
+  over ~8k chars failed, every short one was fine.
+- Given more headroom it parses but the model spends the budget retyping the body and returns
+  `summary`, `target_doc_path` **and** `keywords` as null — and the echo it produces is silently
+  **abridged** (measured: 4.1k chars back from 9.9k in), so the body can't be trusted either.
+
+It surfaced as three unrelated-looking bugs — note filed to the default Doc, no H3 one-liner, no
+H5 keywords — plus a silent hit to the routing header's credibility (the header forced the note
+correctly; there was nothing left to file it *with*). **The hierarchy was never stale**; don't go
+looking for a cache. Verify a length hypothesis against `scratch_entry.route_result` before
+anything else — it stores the exact classification and `unknown`/0.0 means the call *failed*.
+- **Above `config.CLASSIFY_MAX_CHARS` the classifier is shown only the head** (`_excerpt`), and
+  `classify` **discards any `note_text` it echoes back**. Prompt-only does NOT hold — the model
+  echoes even when told not to (measured), so the code-side drop is the guard and
+  `_echo_section` is only belt-and-braces. Routing reads off the head anyway: the header is the
+  first line.
+- **Code supplies the body instead** (`_guarded_note_body`), so this is **not** a third verbatim
+  relaxation — it is *less* LLM involvement, not more: code copies the user's words rather than
+  the model retyping them, which is strictly safer than the echo it replaces.
+- **A capture's first line is not a header unless a closed-vocabulary token proves it**
+  (`_Header.determinate` — a `task`/`note` keyword or a date word). `_parse_header` always
+  populates `body`, but stripping it on an unproven segment silently eats the user's first line
+  (`"line 0\nline 1…"` → `"line 1…"`). Undeterminate → fall back to the raw capture. Anything
+  reading `header.body` must gate on `determinate`.
+- Keep `ROUTER_MAX_TOKENS` generously above the echo cap: overflow is **catastrophic, not
+  degraded** (unknown, not a shorter note), and headroom is free — `max_tokens` is a cap, not a cost.
+
+**2. Route-once was a check-then-act, and inline routing made the window ~25s.**
+`route_entry` read `routing_state == UNROUTED`, then wrote the final state only after the
+classifier call + Docs append. Goal-7c (inline routing) and goal-10 (long pastes) stretched that
+gap wide enough for a second router — the scheduler backstop, a "Route now" click, a retried POST
+— to read the same UNROUTED row and **append the same note to the Doc twice** (observed: one
+capture, two Doc entries). The route-once *contract* was never wrong; its *implementation* was
+not atomic.
+- **`_claim_for_routing` is a conditional UPDATE** (CAS `UNROUTED` → `ROUTING`): the WHERE clause
+  re-checks the state inside the database's own atomic write, so exactly one caller wins and the
+  losers no-op. Any new routing entry point **must** claim before doing slow work — the plain
+  `!= UNROUTED` check is only a cheap early-out, never the guard.
+- **A claim is transient, never a grave.** `_release_claim` hands it back to `UNROUTED` on
+  failure (the goal-5 re-routable contract); `route_unrouted` reclaims claims older than
+  `_STALE_CLAIM_SECONDS` (`routed_at` doubles as the claim timestamp) so a process that dies
+  mid-route still recovers. `_STALE_CLAIM_SECONDS` must stay well above a real inline route.
+- `confirm_review` has the same check-then-act shape on `status == PENDING`; it has not bitten
+  (no LLM call in that path, and confirm is a deliberate click) but it is the same class of bug.
+
 ## Goal 8: per-user routing
 
 Routing is per-user. `route_entry(session, user, creds, entry)` /

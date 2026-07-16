@@ -18,6 +18,8 @@ settings/rename path (never the router — AST-asserted).
 from __future__ import annotations
 
 import asyncio
+import re
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from googleapiclient.discovery import build
@@ -96,6 +98,200 @@ def _keyword_line(keywords: list[str] | None) -> str:
     return ", ".join(k.strip() for k in keywords if k and k.strip())
 
 
+# ── The structured-body renderer (goal 10) ────────────────────────────────────
+#
+# A note body is parsed as *light* markdown and rendered with Docs styling instead
+# of one flat text run. This is a DETERMINISTIC, code-only transform — no LLM, no
+# new Docs method (still one `documents.batchUpdate`, insert-only). Only markdown
+# *markers* are consumed as styling; every word of the body survives verbatim.
+#
+# The one hard invariant (the point of this goal): a markdown heading in the body
+# renders as a **bold NORMAL_TEXT** line, NEVER a `HEADING_*` paragraph — so the
+# entry's H3/H4/H5 chrome stays the only heading structure and a future
+# "extract all H4s" search can never be polluted by a pasted `## Agenda`.
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_UL_RE = re.compile(r"^[-*]\s+(.*)$")
+_OL_RE = re.compile(r"^\d+\.\s+(.*)$")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+# Per markdown-heading level, a small paragraph indent conveys depth WITHOUT a
+# heading style (depth may be shown by indent; never by `HEADING_*`).
+_HEADING_INDENT_PT = 18.0
+
+
+def _consume_bold(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Strip `**bold**` markers, returning (clean_text, bold_offset_ranges).
+
+    Ranges are (start, end) offsets into the RETURNED clean text. Everything that is
+    not a marker passes through verbatim; text with no `**` returns unchanged, [].
+    """
+    parts: list[str] = []
+    ranges: list[tuple[int, int]] = []
+    last = 0
+    pos = 0
+    for m in _BOLD_RE.finditer(text):
+        lead = text[last : m.start()]
+        parts.append(lead)
+        pos += len(lead)
+        inner = m.group(1)
+        parts.append(inner)
+        ranges.append((pos, pos + len(inner)))
+        pos += len(inner)
+        last = m.end()
+    parts.append(text[last:])
+    return "".join(parts), ranges
+
+
+@dataclass
+class _BodyPara:
+    """One rendered body paragraph. `text` is inserted verbatim (with leading tabs
+    for a nested bullet, which `createParagraphBullets` later consumes for its level);
+    `bold_ranges` are offsets into `text`; `bullet` is "ul"/"ol"/None; `indent_pt`
+    conveys a markdown-heading's depth (paragraph indent, never a heading style)."""
+
+    text: str
+    bold_ranges: list[tuple[int, int]] = field(default_factory=list)
+    bullet: str | None = None
+    indent_pt: float = 0.0
+
+
+def _parse_markdown(body: str) -> list[_BodyPara]:
+    """Parse a body into rendered paragraphs (light markdown, line-based).
+
+    A markdown heading → a whole-line-bold plain paragraph (NEVER a heading style).
+    A `- `/`* `/`1. ` line → a bullet paragraph, nesting from its leading indent
+    (2 spaces or a tab per level). Any other line passes through verbatim. Inline
+    `**bold**` is consumed to bold runs on every kind."""
+    paras: list[_BodyPara] = []
+    for line in body.split("\n"):
+        stripped = line.lstrip(" \t")
+        indent = line[: len(line) - len(stripped)]
+        depth = indent.count("\t") + indent.count(" ") // 2
+
+        m = _HEADING_RE.match(stripped)
+        if m:
+            clean, _ = _consume_bold(m.group(2))
+            paras.append(
+                _BodyPara(
+                    clean,
+                    [(0, len(clean))] if clean else [],
+                    None,
+                    (len(m.group(1)) - 1) * _HEADING_INDENT_PT,
+                )
+            )
+            continue
+
+        bullet = None
+        content = None
+        mu = _UL_RE.match(stripped)
+        if mu:
+            bullet, content = "ul", mu.group(1)
+        else:
+            mo = _OL_RE.match(stripped)
+            if mo:
+                bullet, content = "ol", mo.group(1)
+
+        if bullet is not None:
+            clean, ranges = _consume_bold(content)
+            tabs = "\t" * depth
+            shifted = [(a + depth, b + depth) for a, b in ranges]
+            paras.append(_BodyPara(tabs + clean, shifted, bullet, 0.0))
+            continue
+
+        # Plain line: kept verbatim (leading indent and all), only inline bold consumed.
+        clean, ranges = _consume_bold(line)
+        paras.append(_BodyPara(clean, ranges, None, 0.0))
+    return paras
+
+
+def _bold_request(start: int, end: int) -> dict:
+    return {
+        "updateTextStyle": {
+            "range": {"startIndex": start, "endIndex": end},
+            "textStyle": {"bold": True},
+            "fields": "bold",
+        }
+    }
+
+
+def _render_body(body_text: str, start: int) -> tuple[str, list[dict], list[dict], int]:
+    """Render a body as light markdown → (inserted_text, style_reqs, bullet_reqs, end).
+
+    `inserted_text` is the body's contribution to the insert block (each paragraph
+    followed by "\\n"), using absolute doc indices from `start`. `style_reqs` are the
+    paragraph-style + bold text-style requests (safe at the original indices).
+    `bullet_reqs` are the `createParagraphBullets` requests, returned SEPARATELY and
+    sorted descending by start index: they consume leading tabs (shifting indices of
+    text *after* them), so the caller applies them LAST and top-down, leaving every
+    already-computed lower index valid. `end` is the doc index just past the body."""
+    paras = _parse_markdown(body_text)
+    text_parts: list[str] = []
+    style_reqs: list[dict] = []
+    bullet_reqs: list[dict] = []
+    idx = start
+    run: list[tuple[int, int]] = []
+    run_ordered: bool | None = None
+
+    def _flush_run() -> None:
+        nonlocal run, run_ordered
+        if run:
+            bullet_reqs.append(
+                {
+                    "createParagraphBullets": {
+                        "range": {"startIndex": run[0][0], "endIndex": run[-1][1]},
+                        "bulletPreset": (
+                            "NUMBERED_DECIMAL_ALPHA_ROMAN"
+                            if run_ordered
+                            else "BULLET_DISC_CIRCLE_SQUARE"
+                        ),
+                    }
+                }
+            )
+        run = []
+        run_ordered = None
+
+    for p in paras:
+        end = idx + len(p.text) + 1  # +1 for the paragraph's trailing "\n"
+        text_parts.append(p.text)
+
+        style: dict = {"namedStyleType": "NORMAL_TEXT"}
+        fields = "namedStyleType"
+        if p.indent_pt:
+            style["indentStart"] = {"magnitude": p.indent_pt, "unit": "PT"}
+            style["indentFirstLine"] = {"magnitude": p.indent_pt, "unit": "PT"}
+            fields += ",indentStart,indentFirstLine"
+        style_reqs.append(
+            {
+                "updateParagraphStyle": {
+                    "range": {"startIndex": idx, "endIndex": end},
+                    "paragraphStyle": style,
+                    "fields": fields,
+                }
+            }
+        )
+        for bs, be in p.bold_ranges:
+            if be > bs:
+                style_reqs.append(_bold_request(idx + bs, idx + be))
+
+        if p.bullet is not None:
+            ordered = p.bullet == "ol"
+            if run and run_ordered != ordered:
+                _flush_run()
+            run.append((idx, end))
+            run_ordered = ordered
+        else:
+            _flush_run()
+        idx = end
+    _flush_run()
+
+    bullet_reqs.sort(
+        key=lambda r: r["createParagraphBullets"]["range"]["startIndex"], reverse=True
+    )
+    inserted = "".join(f"{t}\n" for t in text_parts)
+    return inserted, style_reqs, bullet_reqs, idx
+
+
 def _insert_note(
     creds: "Credentials",
     doc_id: str,
@@ -123,31 +319,43 @@ def _insert_note(
     above/below (goal 7a) — the Docs API has no horizontal-rule request, so a
     `borderBottom` on an empty paragraph is the closest insert-only equivalent —
     so consecutive notes read as separated entries, not a run-on wall.
+
+    Goal 10: the body is rendered as **light markdown** (`_render_body`) — headings
+    become bold NORMAL_TEXT lines (never `HEADING_*`), bullets become real Docs
+    bullets, inline `**bold**` becomes bold runs — instead of one flat text run. A
+    body with no markdown renders byte-identically to before (one NORMAL_TEXT line).
+    Still ONE insert-only `batchUpdate`; `createParagraphBullets` requests apply last
+    (top-down) because they consume leading tabs and shift later indices.
     """
     service = _docs_service(creds)
 
     summary_text = (summary_text or "").strip() or _NO_SUMMARY_PLACEHOLDER
     keyword_text = _keyword_line(keywords)
 
-    # The ordered paragraphs that make up this entry: (text, named-style). The
-    # one-liner is ALWAYS the H3 headline and the timestamp ALWAYS the H4 beneath it —
-    # a blank summary uses a placeholder rather than shifting the timestamp up, so the
-    # heading levels stay uniform for later heading-extraction search. The body is
-    # always present (even if empty); only the H5 keyword line is conditional.
-    lines: list[tuple[str, str]] = [
+    # The entry chrome — ALWAYS H3 one-liner → H4 timestamp → optional H5 keywords.
+    # The one-liner is a placeholder when blank so the timestamp never shifts off H4
+    # (stable levels for later heading-extraction search). The body contributes NO
+    # heading, ever — that is the goal-10 invariant enforced by `_render_body`.
+    chrome: list[tuple[str, str]] = [
         (summary_text, "HEADING_3"),
         (heading_text, "HEADING_4"),
     ]
     if keyword_text:
-        lines.append((keyword_text, "HEADING_5"))
-    lines.append((body_text, "NORMAL_TEXT"))
+        chrome.append((keyword_text, "HEADING_5"))
 
-    # Block: every line + "\n", then a trailing EMPTY paragraph for the delimiter.
-    block = "".join(f"{text}\n" for text, _ in lines) + "\n"
+    chrome_text = "".join(f"{text}\n" for text, _ in chrome)
+    body_start = 1 + len(chrome_text)
+    body_rendered, body_style_reqs, bullet_reqs, body_end = _render_body(
+        body_text, body_start
+    )
+
+    # Block: the chrome lines, the rendered body, then a trailing EMPTY paragraph
+    # (the delimiter). One insertText for the whole block at the top (index 1).
+    block = chrome_text + body_rendered + "\n"
     requests: list[dict] = [{"insertText": {"location": {"index": 1}, "text": block}}]
 
-    idx = 1  # running start index (body starts at doc index 1)
-    for text, style in lines:
+    idx = 1
+    for text, style in chrome:
         end = idx + len(text) + 1
         requests.append(
             {
@@ -160,14 +368,19 @@ def _insert_note(
         )
         idx = end
 
+    # Body paragraph/bold styles (safe at original indices — no index shift).
+    requests.extend(body_style_reqs)
+
     # The trailing empty paragraph → a light-gray horizontal delimiter with
     # breathing room, separating this note from the one below. Insert-only: this
     # styles the just-inserted empty paragraph, never any pre-existing content.
-    delim_end = idx + 1
+    # Applied BEFORE the bullet requests so its index is still valid (bullets remove
+    # leading tabs and shift everything after them).
+    delim_end = body_end + 1
     requests.append(
         {
             "updateParagraphStyle": {
-                "range": {"startIndex": idx, "endIndex": delim_end},
+                "range": {"startIndex": body_end, "endIndex": delim_end},
                 "paragraphStyle": {
                     "namedStyleType": "NORMAL_TEXT",
                     "spaceAbove": {"magnitude": 8, "unit": "PT"},
@@ -187,6 +400,12 @@ def _insert_note(
             }
         }
     )
+
+    # Bullet requests LAST and top-down: `createParagraphBullets` removes each
+    # paragraph's leading tabs (its nesting level), shifting the indices of text
+    # after it — so every earlier request has already run against valid indices, and
+    # each remaining (lower-index) bullet request is unaffected by higher removals.
+    requests.extend(bullet_reqs)
 
     service.documents().batchUpdate(
         documentId=doc_id, body={"requests": requests}

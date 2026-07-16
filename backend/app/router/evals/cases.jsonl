@@ -46,3 +46,10 @@
 {"text": "remember the Vsauce video on entropy", "destination": "note", "doc_path_expect": "", "strip_expect": "remember the Vsauce video on entropy"}
 {"text": "random thought about the weather today", "destination": "note", "doc_path_expect": ""}
 {"text": "john progression: next level is staff eng", "destination": "note", "doc_path_expect": "conversations/john/progression", "strip_expect": "next level is staff eng"}
+{"text": "tomorrow task pay the plumber", "destination": "task", "title_contains": "plumber", "expects_due": true, "header_forces": "task", "header_date": true}
+{"text": "task tomorrow pay the plumber", "destination": "task", "title_contains": "plumber", "expects_due": true, "header_forces": "task", "header_date": true}
+{"text": "task day after submit the reimbursement form", "destination": "task", "expects_due": true, "header_forces": "task", "header_date": true}
+{"text": "task friday call the bank about the loan", "destination": "task", "expects_due": true, "header_forces": "task"}
+{"text": "notes daily syncup - we agreed to ship the beta and follow up with design on the new flow", "destination": "note", "doc_path_expect": "conversations/meetings/internal/daily syncup", "header_forces": "note"}
+{"text": "notes ideas - action items: buy milk, call bob, send the deck to finance", "destination": "note", "doc_path_expect": "ideas", "header_forces": "note"}
+{"text": "notes - the offsite venue everyone liked was the lakeside resort", "destination": "note", "header_forces": "note"}

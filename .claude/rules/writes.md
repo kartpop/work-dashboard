@@ -175,3 +175,22 @@ refreshes cleanly after `SCOPES` grows.
   hierarchy Doc with `file_accessible` (cached per `(user_id, drive_id)`); a definite **404**
   re-creates the Doc **at the same path** (re-creating any missing ancestor folders) and updates the
   index; any non-404 error fails closed. The default-Doc/root-folder self-heal is unchanged.
+
+## Goal 10: structured-body rendering in `insert_note` (the formatter)
+
+- **The body is rendered as light markdown, deterministically — NOT an LLM step.** `docs._render_body`
+  parses the (still-verbatim) body and emits Docs styling instead of one flat text run: markdown
+  **headings (`#`…`######`) → bold NORMAL_TEXT lines** (marker stripped, words kept, depth as paragraph
+  indent), **bullets / numbered lists (`- `/`* `/`1. `, nested by 2-space/tab indent) → real Docs
+  bullets** (`createParagraphBullets`, nesting via leading tabs), **inline `**bold**` → bold runs**
+  (markers consumed). Anything unrecognized passes through verbatim. No new LLM call, no third verbatim
+  relaxation — only markdown *markers* are consumed as styling.
+- **The no-body-headings invariant (the point of the goal).** Body input can produce bold / indent /
+  bullets but **NEVER a `HEADING_*` paragraph** — the entry chrome stays the only heading structure
+  (H3 one-liner → H4 timestamp → H5 keywords), so goal-9's "extract all H4s" search can never be
+  polluted by a pasted `## Agenda`. A unit test pins "zero `HEADING_*` from body content, ever."
+- **Still ONE insert-only `documents.batchUpdate`, no new method surface.** `createParagraphBullets` /
+  `updateTextStyle` are *request types* inside the single batchUpdate, not new service methods — the
+  AST insert-only test is unchanged. Bullet requests apply **last, top-down** (they consume leading
+  tabs and shift later indices, so every earlier request runs against valid indices). A body with no
+  markdown renders **byte-identically** to the pre-goal-10 shape (one NORMAL_TEXT paragraph).

@@ -22,6 +22,10 @@ import {
 
 const STATE_LABEL: Record<string, string> = {
   unrouted: "Unrouted",
+  // A capture the router is filing right now (the atomic route-once claim). The poll
+  // can observe it mid-flight — a long paste takes ~25s — so it needs a label of its
+  // own; without one it rendered as a blank chip.
+  routing: "Filing…",
   routed_task: "→ Task",
   kept_note: "Note",
   in_review: "In review",
@@ -30,7 +34,7 @@ const STATE_LABEL: Record<string, string> = {
 
 // A capture is "unresolved" until the router files it — those stay at the top of
 // RECENT; everything else is a routed/resolved confirmation tail (dimmed, capped).
-const UNRESOLVED_STATES = new Set(["unrouted", "in_review"]);
+const UNRESOLVED_STATES = new Set(["unrouted", "routing", "in_review"]);
 const ROUTED_TAIL_MAX = 5;
 
 // Recent rows truncate to one line (full text via copy button + hover title).

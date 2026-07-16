@@ -26,17 +26,20 @@ from pathlib import Path
 
 from app.router import config
 from app.router.classifier import classify
+from app.router.service import _parse_header
 
 _CASES = Path(__file__).with_name("cases.jsonl")
 _CLASSES = ("task", "note", "event", "unknown")
 
 # A fixture notes hierarchy injected for eval runs (goal 9): the classifier sees
 # these leaf paths so `target_doc_path` proposals can be graded. Cases reference
-# them via `doc_path_expect` ("" = the default Doc).
+# them via `doc_path_expect` ("" = the default Doc). The multi-word `daily syncup`
+# leaf (goal 10) exercises the routing-header doc-path match.
 FIXTURE_DOC_PATHS = [
     "conversations/john/growth",
     "conversations/john/progression",
     "conversations/jane",
+    "conversations/meetings/internal/daily syncup",
     "ideas",
     "reading",
 ]
@@ -110,22 +113,43 @@ def _strip_check(case: dict, fields: dict) -> bool | None:
     return (fields.get("note_text") or "").strip() == case["strip_expect"].strip()
 
 
+def _effective_dest(r: dict) -> str:
+    """The destination AFTER the goal-10 routing-header forcing — a `task`/`note`
+    keyword header overrides the LLM's proposed destination (what actually happens at
+    dispose time). Absent/ambiguous header → the LLM's prediction, unchanged."""
+    return _parse_header(r["text"]).forced_dest or r["predicted"]
+
+
+def _disposition(r: dict, threshold: float) -> str:
+    """The disposition route_entry would reach: 'task'/'note' when acted on, else
+    'review'. A keyword header forces the destination AND bypasses the confidence
+    gate (goal 10); otherwise the gate applies."""
+    hdr = _parse_header(r["text"])
+    forced = hdr.forced_dest is not None
+    dest = hdr.forced_dest or r["predicted"]
+    act = forced or r["confidence"] >= threshold
+    return dest if (dest in ("task", "note") and act) else "review"
+
+
 def score(results: list[dict], threshold: float = config.CONFIDENCE_THRESHOLD) -> dict:
     """Pure scoring over per-case result rows. Computes destination accuracy
     (overall + clear-only), per-class P/R, confusion matrix, calibration, key-field
-    extraction, and the gate-critical task false-positive count."""
-    n = len(results)
-    correct = sum(r["predicted"] == r["expected"] for r in results)
-    clear = [r for r in results if not r["ambiguous"]]
-    clear_correct = sum(r["predicted"] == r["expected"] for r in clear)
+    extraction, and the gate-critical task false-positive count.
 
-    # Confusion matrix + per-class P/R.
+    Destination accuracy is graded on the EFFECTIVE destination (post routing-header
+    forcing, goal 10) — a keyword header is honoured exactly as dispose honours it."""
+    n = len(results)
+    correct = sum(_effective_dest(r) == r["expected"] for r in results)
+    clear = [r for r in results if not r["ambiguous"]]
+    clear_correct = sum(_effective_dest(r) == r["expected"] for r in clear)
+
+    # Confusion matrix + per-class P/R (on the effective destination).
     confusion: dict[str, dict[str, int]] = {a: defaultdict(int) for a in _CLASSES}
     tp = defaultdict(int)
     fp = defaultdict(int)
     fn = defaultdict(int)
     for r in results:
-        a, p = r["expected"], r["predicted"]
+        a, p = r["expected"], _effective_dest(r)
         confusion[a][p] += 1
         if a == p:
             tp[a] += 1
@@ -189,6 +213,27 @@ def score(results: list[dict], threshold: float = config.CONFIDENCE_THRESHOLD) -
     ]
     strip_graded = [x for x in strip_graded if x is not None]
 
+    # Header contract (goal 10): keyword-headed captures must NEVER bounce to review
+    # (forcing bypasses the gate), and an unambiguous relative-date header must resolve
+    # a due date. Cases are labelled `header_forces` / `header_date`.
+    header_forced = [
+        r for r in results if "case" in r and r["case"].get("header_forces")
+    ]
+    header_parse_ok = sum(
+        1
+        for r in header_forced
+        if _parse_header(r["text"]).forced_dest == r["case"]["header_forces"]
+    )
+    header_review_bounces = sum(
+        1 for r in header_forced if _disposition(r, threshold) == "review"
+    )
+    header_date = [r for r in results if "case" in r and r["case"].get("header_date")]
+    header_date_resolved = sum(
+        1
+        for r in header_date
+        if (r["fields"].get("due_date") or _parse_header(r["text"]).date_backstop)
+    )
+
     clear_accuracy = (clear_correct / len(clear)) if clear else None
     passed = (
         clear_accuracy is not None
@@ -197,6 +242,11 @@ def score(results: list[dict], threshold: float = config.CONFIDENCE_THRESHOLD) -
         and ambiguous_auto_written == 0
         # Doc-path threshold: ≥ 0.9 when the hierarchy subset is present.
         and (doc_path_accuracy is None or doc_path_accuracy >= 0.90)
+        # Header contract (goal 10): every labelled keyword header is recognised and
+        # never bounces; every relative-date header resolves a due date.
+        and header_parse_ok == len(header_forced)
+        and header_review_bounces == 0
+        and header_date_resolved == len(header_date)
     )
 
     return {
@@ -224,6 +274,11 @@ def score(results: list[dict], threshold: float = config.CONFIDENCE_THRESHOLD) -
         "prefix_strip_fidelity": f"{sum(strip_graded)}/{len(strip_graded)}",
         "task_false_positives": task_false_positives,
         "ambiguous_auto_written": ambiguous_auto_written,
+        "header_contract": {
+            "keyword_parse_ok": f"{header_parse_ok}/{len(header_forced)}",
+            "review_bounces": header_review_bounces,
+            "relative_date_resolved": f"{header_date_resolved}/{len(header_date)}",
+        },
         "threshold": threshold,
         "passed": passed,
     }

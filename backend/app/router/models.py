@@ -15,6 +15,14 @@ from sqlmodel import Field, SQLModel
 
 # ── Routing states (scratch_entry.routing_state) ──────────────────────────────
 UNROUTED = "unrouted"
+# In-flight claim (goal 10a): exactly one router owns this entry right now. Route-once
+# used to be a check-then-act — read UNROUTED, then write the final state ~20s later,
+# after the LLM call and the Docs append. Anything that read the row inside that window
+# (the scheduler backstop, a "Route now" click, a retried POST) routed it a second time
+# and appended the note TWICE. `service._claim_for_routing` makes the flip atomic, so
+# the losers see a non-UNROUTED row and no-op. Transient: released back to UNROUTED on
+# failure, and reclaimed by the backstop if the process dies mid-route.
+ROUTING = "routing"
 ROUTED_TASK = "routed_task"
 KEPT_NOTE = "kept_note"
 IN_REVIEW = "in_review"

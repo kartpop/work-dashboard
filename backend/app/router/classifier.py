@@ -42,7 +42,9 @@ named weekdays like "friday" and "next monday"), notes (any trailing detail; els
 "idea: a CLI for X"). Extract:
   - note_text: the note body with ONLY the routing prefix stripped (see FILING below). \
 Everything else is preserved **VERBATIM** — do NOT reword, summarize, or drop a single \
-word. If there is no routing prefix, note_text is the raw text unchanged.
+word. If there is no routing prefix, note_text is the raw text unchanged. This rule is \
+OVERRIDDEN by the TRUNCATED CAPTURE block below when it is present: never echo a body \
+you were only shown part of.
   - summary: a single short phrase (a few words) capturing the note's essence, like a \
 headline; NOT a rewrite of the note, NOT a full sentence.
   - target_doc_path: which Doc in the user's hierarchy (FILING below) this note belongs \
@@ -57,11 +59,68 @@ correct. Be honest and well-calibrated: use a LOW confidence (<0.7) for ambiguou
 ("Tejas?", "the thing from earlier") so they are sent for human review rather than guessed. \
 A clear, unambiguous capture should score high (>0.9).
 
+ROUTING HEADER (takes precedence over the body):
+The first few words of a capture — everything BEFORE the first "-" delimiter or newline — \
+are ROUTING WORDS that steer where it goes. They are ORDER-INSENSITIVE and made of:
+- a destination keyword: "task" / "todo" → the capture is a task; "note" / "notes" → a note;
+- date words: "today", "tomorrow", "day after (tomorrow)", or a named weekday ("friday");
+- doc-path words: the name of one of the user's notes Docs (see FILING), possibly multi-word \
+("daily syncup").
+Because they are order-insensitive, "tomorrow task pay the plumber" and "task tomorrow pay \
+the plumber" are the SAME instruction — both a task due tomorrow titled "pay the plumber". A \
+header ALWAYS WINS over what the body looks like: "notes daily syncup - <a long list that \
+reads like action items>" is a NOTE filed to the daily-syncup Doc, NOT a task list, and you \
+should be CONFIDENT in that (do not lower confidence just because the body reads like tasks). \
+Strip the recognized routing words (and the "-" delimiter) from the extracted title/note_text; \
+keep the rest verbatim. Only when there is NO header, or a header does not determine some \
+field, do you infer that field from the body.
+
 Output ONLY the structured classification."""
 
 
 def _today_ist() -> str:
     return datetime.now(_IST).date().isoformat()
+
+
+def _excerpt(text: str) -> tuple[str, bool]:
+    """Cap what the classifier is shown; returns (shown_text, was_truncated).
+
+    Goal 10a. Not a context-window concern — an output-budget one. Shown the whole of a
+    ~10k-char capture, the model spends its entire response retyping the body into
+    `note_text` and then returns summary/target_doc_path/keywords as null: the exact
+    "filed to the wrong Doc with no one-liner" bug. Excerpting the input bounds the echo
+    so the fields that actually drive routing have budget left — and they read off the
+    head anyway (the routing header is the first line). The body is never sourced from
+    this call, so nothing downstream loses words."""
+    t = text.strip()
+    if len(t) <= config.CLASSIFY_MAX_CHARS:
+        return t, False
+    return (
+        t[: config.CLASSIFY_MAX_CHARS]
+        + "\n\n[... capture truncated for classification; "
+        "the application holds the full text ...]",
+        True,
+    )
+
+
+def _echo_section(truncated: bool) -> str:
+    """The TRUNCATED CAPTURE block — tells the model not to bother echoing.
+
+    Belt to `_excerpt`'s braces, and it resolves a real contradiction: the note_text
+    rule above says preserve VERBATIM, do not drop a word — which, applied to an
+    excerpt, would have the model faithfully echo a body that is missing its tail.
+    Not load-bearing on its own; `classify` discards the echo either way (measured: the
+    model echoes regardless of what it is told here, so this must never be the guard)."""
+    if not truncated:
+        return ""
+    return (
+        "\n\nTRUNCATED CAPTURE: the capture above was cut short for classification — "
+        "you are seeing only its beginning. Set note_text to null; do NOT echo the "
+        "body (the application holds the full text and will use it verbatim, so an "
+        "echo would be discarded). Spend your output on the fields that matter: "
+        "destination, summary, target_doc_path, keywords. Judge from what you can "
+        "see and be confident — a long capture is not an ambiguous one."
+    )
 
 
 def _filing_section(doc_paths: list[str] | None) -> str:
@@ -97,11 +156,12 @@ async def classify(
     into the system prompt so the LLM can propose a `target_doc_path`."""
     try:
         client = anthropic.AsyncAnthropic()
-        user = f"TODAY (IST): {_today_ist()}\n\nCaptured thought:\n{text.strip()}"
+        shown, truncated = _excerpt(text)
+        user = f"TODAY (IST): {_today_ist()}\n\nCaptured thought:\n{shown}"
         resp = await client.messages.parse(
             model=config.ROUTER_MODEL,
             max_tokens=config.ROUTER_MAX_TOKENS,
-            system=_SYSTEM + _filing_section(doc_paths),
+            system=_SYSTEM + _filing_section(doc_paths) + _echo_section(truncated),
             messages=[{"role": "user", "content": user}],
             output_format=RouterClassification,
         )
@@ -111,6 +171,13 @@ async def classify(
             return unknown_classification()
         # Clamp a malformed confidence into range rather than trusting it blindly.
         result.confidence = max(0.0, min(1.0, result.confidence))
+        if truncated:
+            # DROP any echo of a capture we only showed the head of (goal 10a). The
+            # model echoes even when told not to, and an echo of an excerpt is a body
+            # missing its tail — accepting it would silently truncate the user's note.
+            # Code-disposes: `service._guarded_note_body` rebuilds the body from the
+            # raw text, so the words come from the user, not from the model.
+            result.fields.note_text = None
         return result
     except Exception:
         # Model error, auth error, network error — never crash the pipeline. Log

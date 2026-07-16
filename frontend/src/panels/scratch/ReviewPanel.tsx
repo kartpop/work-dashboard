@@ -1,5 +1,23 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { ReviewFields, ReviewItem } from "./useScratchPanel";
+
+// The note-body box grows with its content (a pasted MOM is reviewable, not a
+// keyhole) up to a sensible max, then scrolls. Newlines are preserved by the
+// textarea itself. Kept local — it's the only auto-sizing box in the panel.
+const NOTE_TEXTAREA_MAX_PX = 320;
+
+function useAutoSize(value: string) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, NOTE_TEXTAREA_MAX_PX)}px`;
+    el.style.overflowY =
+      el.scrollHeight > NOTE_TEXTAREA_MAX_PX ? "auto" : "hidden";
+  }, [value]);
+  return ref;
+}
 
 // The user resolves a review item as a task or a note only (goal 7c). `event`
 // stays a valid classifier output — it just lands here for the user to pick one
@@ -79,6 +97,7 @@ function ReviewRow({
     item.fields.note_text ?? item.entry_text ?? "",
   );
   const [summary, setSummary] = useState(item.fields.summary ?? "");
+  const noteTextRef = useAutoSize(noteText);
   // Destination Doc: prefill the classifier's proposed path when it's a real leaf,
   // else the default Doc ("" sentinel). The dropdown only offers real leaves.
   const [docPath, setDocPath] = useState(
@@ -203,6 +222,7 @@ function ReviewRow({
               onChange={(e) => setSummary(e.target.value)}
             />
             <textarea
+              ref={noteTextRef}
               className="review-note-text"
               value={noteText}
               placeholder="note text"

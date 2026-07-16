@@ -22,9 +22,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+import re
+import zoneinfo
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from sqlalchemy import update as sa_update
 from sqlmodel import Session, select
 
 from app.errors import ApiError
@@ -39,6 +43,7 @@ from app.router.models import (
     PENDING,
     RESOLVED,
     ROUTED_TASK,
+    ROUTING,
     UNROUTED,
     ReviewItem,
     ScratchEntry,
@@ -70,16 +75,185 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _guarded_note_body(raw: str, note_text: str | None) -> str:
+# A routing claim older than this is presumed dead (the process died mid-route) and is
+# reclaimed by the scheduler backstop. Must comfortably exceed a real inline route
+# (classifier + Docs append ≈ 25s observed) so a slow route is never stolen from itself.
+_STALE_CLAIM_SECONDS = 300
+
+
+def _claim_for_routing(session: Session, entry: ScratchEntry) -> bool:
+    """Atomically claim `entry` for routing: compare-and-swap UNROUTED → ROUTING.
+
+    Route-once (goal 5) was a check-then-act: `route_entry` read `routing_state ==
+    UNROUTED` and only wrote the final state after the classifier call and the Docs
+    append. Goal-7c moved routing inline and goal-10 brought long meeting-notes pastes,
+    stretching that window to ~25 seconds — wide enough for a concurrent router to read
+    the same UNROUTED row and append the SAME note to the Doc a second time (observed:
+    one capture, two Doc entries). The readers that can collide are the scheduler
+    backstop, a "Route now" click, and a retried POST.
+
+    A conditional UPDATE is the fix: the WHERE clause re-checks UNROUTED inside the
+    database's own atomic write, so exactly one caller can flip it. Losers get
+    rowcount 0 and no-op. `routed_at` doubles as the claim timestamp (overwritten with
+    the completion time on success) so a dead claim is detectable without a new column.
+    """
+    result = session.execute(
+        sa_update(ScratchEntry)
+        .where(ScratchEntry.id == entry.id)
+        .where(ScratchEntry.routing_state == UNROUTED)
+        .values(routing_state=ROUTING, routed_at=_now())
+    )
+    session.commit()
+    session.refresh(entry)
+    return result.rowcount == 1
+
+
+def _release_claim(session: Session, entry: ScratchEntry) -> None:
+    """Hand a claimed entry back to UNROUTED after a failed route (re-routable).
+
+    Preserves the goal-5 contract that a Google-write failure leaves nothing
+    half-written and the backstop can retry. The rollback discards the partial work
+    first; the release is then committed on its own."""
+    session.rollback()
+    entry.routing_state = UNROUTED
+    session.add(entry)
+    session.commit()
+
+
+# ── The routing header (goal 10) ──────────────────────────────────────────────
+#
+# The first few words of a capture — everything before the first "-"/newline —
+# are ORDER-INSENSITIVE routing words the user steers with. The LLM interprets the
+# open-vocabulary parts (free word order, multi-word doc paths, named weekdays);
+# code deterministically enforces the CLOSED-vocabulary tokens here so an explicit
+# keyword header never bounces to review (the observed bug) and an unambiguous
+# relative date backstops a null LLM `due_date`. router.md carries the contract.
+
+_IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+_HEADER_MAX_WORDS = 8
+_DELIM_RE = re.compile(r"[-\n]")
+_TASK_KEYWORDS = {"task", "todo"}
+_NOTE_KEYWORDS = {"note", "notes"}
+# Leading closed-vocabulary tokens dropped when degrading a header to a bare body
+# (the no-delimiter fallback). Doc-path words are open-vocabulary — left to the LLM.
+_ROUTING_TOKENS = (
+    _TASK_KEYWORDS | _NOTE_KEYWORDS | {"today", "tomorrow", "day", "after"}
+)
+
+
+def _today_ist() -> datetime:
+    """Today's date (IST), as a datetime at midnight — the relative-date base."""
+    now = datetime.now(_IST)
+    return datetime(now.year, now.month, now.day)
+
+
+def _resolve_header_date(header_low: str) -> str | None:
+    """Resolve an UNAMBIGUOUS relative-date word in the header to YYYY-MM-DD (IST).
+
+    Only `today` / `tomorrow` / `day after (tomorrow)` — the closed-vocabulary tokens
+    from the observed bug. Named weekdays stay LLM-resolved (eval-graded). "day after"
+    is checked before "tomorrow" since it contains it."""
+    base = _today_ist()
+    if "day after" in header_low:
+        return (base + timedelta(days=2)).date().isoformat()
+    if "tomorrow" in header_low:
+        return (base + timedelta(days=1)).date().isoformat()
+    if "today" in header_low:
+        return base.date().isoformat()
+    return None
+
+
+@dataclass
+class _Header:
+    """A parsed routing header. `forced_dest` is set only by an unambiguous single
+    destination keyword; `date_backstop` only by an unambiguous relative-date word;
+    `body` is the capture minus the header segment."""
+
+    forced_dest: str | None = None
+    date_backstop: str | None = None
+    body: str | None = None
+
+    @property
+    def determinate(self) -> bool:
+        """Whether the leading segment is PROVABLY routing words rather than content.
+
+        `body` is always populated (the segment before the first "-"/newline), but that
+        segment is only a header when a closed-vocabulary token proves it — a `task`/
+        `note` keyword or an unambiguous date word. Without that proof the first line is
+        just the note's first line, and dropping it would silently eat the user's words:
+        "line 0\\nline 1..." would file as "line 1...". So `body` is only trustworthy as
+        a body when this is True; otherwise callers must fall back to the raw capture."""
+        return self.forced_dest is not None or self.date_backstop is not None
+
+
+def _parse_header(raw: str) -> _Header:
+    """Parse the routing-header segment (before the first "-"/newline), capped at
+    ~8 words; longer or absent → no header (body inference as today).
+
+    Deterministic and closed-vocabulary only: a lone `task`/`note` keyword forces the
+    destination; a lone unambiguous date word backstops the due date. `daily syncup`
+    and other doc-path / free words are left entirely to the LLM."""
+    match = _DELIM_RE.search(raw)
+    if match:
+        segment = raw[: match.start()]
+        remainder: str | None = raw[match.end() :].strip()
+    else:
+        segment = raw
+        remainder = None
+
+    words = segment.split()
+    if not words or len(words) > _HEADER_MAX_WORDS:
+        return _Header()
+
+    lowered = [w.lower().strip(".,;:!?#") for w in words]
+    has_task = any(w in _TASK_KEYWORDS for w in lowered)
+    has_note = any(w in _NOTE_KEYWORDS for w in lowered)
+    forced = (
+        "task"
+        if (has_task and not has_note)
+        else "note"
+        if (has_note and not has_task)
+        else None
+    )
+    date_backstop = _resolve_header_date(" ".join(lowered))
+
+    if remainder is not None:
+        body = remainder
+    else:
+        # No delimiter: strip leading closed-vocabulary routing tokens, keep the rest.
+        rest = list(words)
+        while rest and rest[0].lower().strip(".,;:!?#") in _ROUTING_TOKENS:
+            rest.pop(0)
+        body = " ".join(rest)
+
+    return _Header(forced_dest=forced, date_backstop=date_backstop, body=body or None)
+
+
+def _guarded_note_body(
+    raw: str, note_text: str | None, header: "_Header | None" = None
+) -> str:
     """The body to write: the prefix-stripped `note_text`, guarded (goal 9).
 
     Truncation guard — a mangled extraction must never silently lose words: if
-    `note_text` is missing, empty, or suspiciously short (< 50% of the raw text's
-    length), fall back to the **raw text verbatim**. Otherwise the stripped text
-    (prefix removed, rest verbatim) wins."""
+    `note_text` is missing, empty, or suspiciously short (< 50% of the fallback's
+    length), fall back to the **user's own words verbatim**. Otherwise the stripped
+    text (prefix removed, rest verbatim) wins.
+
+    Goal 10a — the fallback is header-aware. It used to be the whole `raw` capture,
+    which re-introduced the routing header ("note t4d test") as the note's first line.
+    That was invisible while the fallback was a rare mangled-extraction rescue, but
+    it is now a NORMAL path: past `config.CLASSIFY_MAX_CHARS` the classifier only sees
+    the head of the capture and its `note_text` is discarded outright (an echo of an
+    excerpt is a body missing its tail), so every long note lands here. `header.body` is the
+    same capture with the routing segment deterministically removed, which is exactly
+    what the echo was producing — so code does the strip the LLM no longer does, and
+    the words still come from the user, never from the model."""
+    fallback = (
+        header.body if header and header.determinate and header.body else None
+    ) or raw
     candidate = note_text or ""
-    if not candidate.strip() or len(candidate.strip()) < 0.5 * len(raw.strip()):
-        return raw
+    if not candidate.strip() or len(candidate.strip()) < 0.5 * len(fallback.strip()):
+        return fallback
     return candidate
 
 
@@ -90,6 +264,8 @@ async def _dispose_note(
     entry: ScratchEntry,
     fields: RouterFields,
     body_override: str | None = None,
+    header: "_Header | None" = None,
+    degraded: bool = False,
 ) -> str:
     """Dispose a `note`: route it to the best-matching hierarchy Doc (goal 9).
 
@@ -100,14 +276,26 @@ async def _dispose_note(
     `entry.routed_doc_path` records where it landed (null = default). `summary` +
     optional `keywords` are the only LLM-authored lines. Returns KEPT_NOTE.
 
+    Goal 10 `degraded`: a note FORCED by a `note`/`notes` header whose fields the LLM
+    didn't produce (it proposed a task) degrades safe — body = the raw capture minus
+    the header (`header.body`), no summary/keywords; the doc path still comes from the
+    LLM (null → default Doc, so `resolve_note_target` handles it as always).
+
     A Drive/Docs failure raises (entry left re-routable, rollback) so route-once only
     marks the entry routed after a successful append — same contract as the task path.
     """
-    body_text = (
-        body_override
-        if body_override is not None
-        else _guarded_note_body(entry.text, fields.note_text)
-    )
+    if body_override is not None:
+        body_text = body_override
+    elif degraded:
+        body_text = (
+            header.body if header and header.determinate and header.body else None
+        ) or entry.text
+    else:
+        body_text = _guarded_note_body(entry.text, fields.note_text, header)
+
+    summary = None if degraded else fields.summary
+    keywords = None if degraded else fields.keywords
+
     doc_id, folder_id, canonical = await settings_svc.resolve_note_target(
         session, creds, user_id, fields.target_doc_path
     )
@@ -117,8 +305,8 @@ async def _dispose_note(
             doc_id,
             folder_id,
             body_text,
-            summary=fields.summary,
-            keywords=fields.keywords,
+            summary=summary,
+            keywords=keywords,
         )
     except ApiError:
         session.rollback()
@@ -165,14 +353,25 @@ async def _resolve_list_id(creds: "Credentials", target_list: str | None) -> str
 
 
 async def _create_task_from_fields(
-    session: Session, creds: "Credentials", user_id: int, fields: RouterFields
+    session: Session,
+    creds: "Credentials",
+    user_id: int,
+    fields: RouterFields,
+    header: "_Header | None" = None,
 ) -> dict:
     """Create a Google task from extracted fields, applying list-hint + due date.
 
     Two sanctioned writes only: `create_task` (always) and `reschedule` (only when a
     due date was extracted — the g4a date path). Nothing destructive is reachable.
+
+    Goal 10 header backstops: an unambiguous relative-date word in the routing header
+    (`header.date_backstop`) resolves a null LLM `due_date`; when the LLM proposed a
+    non-task (but a `task` header forced this path) and produced no title, the header's
+    residual body is used so a forced task is never rejected for an empty title.
     """
     title = (fields.title or "").strip()
+    if not title and header is not None and header.body:
+        title = header.body.strip().splitlines()[0].strip()
     if not title:
         raise ApiError(422, "empty_title", "Router produced no task title.")
     list_id = await _resolve_list_id(creds, fields.target_list)
@@ -185,14 +384,16 @@ async def _create_task_from_fields(
     )
 
     # 2) set the due date via the g4a reschedule path (metadata write, non-destructive).
-    if fields.due_date:
+    #    The header's unambiguous relative date backstops a null LLM due_date.
+    due_date = fields.due_date or (header.date_backstop if header else None)
+    if due_date:
         await writes_svc.reschedule(
             session,
             creds,
             user_id,
             tasklist_id=list_id,
             task_id=created["id"],
-            due_date=fields.due_date,
+            due_date=due_date,
             rank=created.get("rank"),
             group_id=None,
         )
@@ -206,12 +407,23 @@ def _new_review_item(
     fields: RouterFields,
     confidence: float,
     reason: str,
+    header: "_Header | None" = None,
 ) -> ReviewItem:
+    """Build a pending review item with the note body **guarded at creation** (goal 10).
+
+    The truncation guard (`_guarded_note_body`) is applied to `note_text` before the
+    fields are frozen into `fields_json`, so every consumer — the editor prefill and
+    the confirm fallback — sees the raw capture verbatim when the LLM's extraction was
+    missing/short, never the mangled low-confidence extraction it just declined to
+    auto-file. Single source of truth server-side; the frontend keeps its `?? entry_text`."""
+    guarded = fields.model_copy(
+        update={"note_text": _guarded_note_body(entry.text, fields.note_text, header)}
+    )
     return ReviewItem(
         user_id=user_id,
         entry_id=entry.id,  # type: ignore[arg-type]
         destination=destination,
-        fields_json=fields.model_dump_json(),
+        fields_json=guarded.model_dump_json(),
         confidence=confidence,
         reason=reason,
         status=PENDING,
@@ -254,6 +466,11 @@ async def route_entry(
     """
     if entry.routing_state != UNROUTED:
         return entry.routing_state
+    # Claim it atomically BEFORE the slow work (goal 10a) — the check above is only a
+    # cheap early-out; the CAS is what actually makes route-once safe against a
+    # concurrent router appending the same note twice.
+    if not _claim_for_routing(session, entry):
+        return entry.routing_state
 
     user_id = user.id
     if classification is None:
@@ -262,28 +479,49 @@ async def route_entry(
     dest = classification.destination
     conf = classification.confidence
     fields = classification.fields
-    above = conf >= config.CONFIDENCE_THRESHOLD
 
-    if dest == "task" and above:
+    # Goal 10 routing header: a destination keyword FORCES the destination and bypasses
+    # the confidence gate FOR DESTINATION ONLY — an explicit `task`/`note` is user
+    # intent, not a probability, and must never bounce to review. Absent/ambiguous
+    # header → the LLM's destination + the gate, as before (goal-9 body inference).
+    header = _parse_header(entry.text)
+    eff_dest = header.forced_dest or dest
+    forced = header.forced_dest is not None
+    act = forced or conf >= config.CONFIDENCE_THRESHOLD
+
+    if eff_dest == "task" and act:
         try:
-            await _create_task_from_fields(session, creds, user_id, fields)
+            await _create_task_from_fields(session, creds, user_id, fields, header)
         except ApiError:
-            # Re-routable: do not persist a routed state; surface the error.
-            session.rollback()
+            # Re-routable: release the claim, persist no routed state, surface the error.
+            _release_claim(session, entry)
             raise
         entry.routing_state = ROUTED_TASK
-    elif dest == "note" and above:
-        entry.routing_state = await _dispose_note(
-            session, creds, user_id, entry, fields
-        )
+    elif eff_dest == "note" and act:
+        # Degrade only when the header forced a note the LLM didn't extract as one.
+        try:
+            entry.routing_state = await _dispose_note(
+                session,
+                creds,
+                user_id,
+                entry,
+                fields,
+                header=header,
+                degraded=forced and dest != "note",
+            )
+        except ApiError:
+            _release_claim(session, entry)
+            raise
     else:
-        if dest in ("task", "note"):
-            reason = f"low confidence ({conf:.2f}) for {dest}"
-        elif dest == "event":
+        if eff_dest in ("task", "note"):
+            reason = f"low confidence ({conf:.2f}) for {eff_dest}"
+        elif eff_dest == "event":
             reason = "events need a manual calendar add (read-only v1)"
         else:
             reason = "unclassifiable"
-        session.add(_new_review_item(entry, user_id, dest, fields, conf, reason))
+        session.add(
+            _new_review_item(entry, user_id, eff_dest, fields, conf, reason, header)
+        )
         entry.routing_state = IN_REVIEW
 
     entry.routed_at = _now()
@@ -295,7 +533,25 @@ async def route_entry(
 async def route_unrouted(session: Session, user: "User", creds: "Credentials") -> dict:
     """Route every `UNROUTED` entry for `user` exactly once. Per-entry write failures
     are tallied and skipped (entry left re-routable) so one bad entry can't stall the
-    batch. Returns a summary tally."""
+    batch. Returns a summary tally.
+
+    Entries mid-flight in another router are `ROUTING` and are simply not selected —
+    that is what stops this backstop from double-appending a note that inline routing
+    is still working on (goal 10a). A claim older than `_STALE_CLAIM_SECONDS` means the
+    router holding it died, so it is reclaimed first: the crash-recovery guarantee is
+    the whole point of the backstop, and a claim must never become a permanent grave.
+    """
+    session.execute(
+        sa_update(ScratchEntry)
+        .where(ScratchEntry.user_id == user.id)
+        .where(ScratchEntry.routing_state == ROUTING)
+        .where(
+            ScratchEntry.routed_at < _now() - timedelta(seconds=_STALE_CLAIM_SECONDS)
+        )
+        .values(routing_state=UNROUTED)
+    )
+    session.commit()
+
     entries = session.exec(
         select(ScratchEntry)
         .where(ScratchEntry.user_id == user.id)
@@ -343,10 +599,13 @@ async def confirm_review(
 
     dest = destination or item.destination
     eff_fields = fields or RouterFields(**json.loads(item.fields_json or "{}"))
+    # Same helpers as auto-route, so a confirmed item gets the same guarantees — the
+    # header's relative-date backstop applies to a confirmed task too (goal 10).
+    header = _parse_header(entry.text)
 
     if dest == "task":
         try:
-            await _create_task_from_fields(session, creds, user.id, eff_fields)
+            await _create_task_from_fields(session, creds, user.id, eff_fields, header)
         except ApiError:
             session.rollback()
             raise

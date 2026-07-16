@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import json
 
 import pytest
 from sqlmodel import select
@@ -25,6 +26,7 @@ from sqlmodel import select
 from tests.conftest import DummyCreds
 
 from app.errors import ApiError
+from app.google import docs as docs_mod
 from app.router import service as router_svc
 from app.router.models import (
     IN_REVIEW,
@@ -32,6 +34,7 @@ from app.router.models import (
     PENDING,
     RESOLVED,
     ROUTED_TASK,
+    ROUTING,
     UNROUTED,
     ReviewItem,
     ScratchEntry,
@@ -369,6 +372,19 @@ def test_low_confidence_task_goes_to_review_not_written(
     assert "insert_task" not in google.names()
 
 
+def test_review_item_note_text_guarded_at_creation(client, google, fake_classify):
+    """Goal 10: a review item built from a mangled/short `note_text` stores the RAW
+    capture verbatim in `fields_json` (the truncation guard moved server-side), so the
+    editor prefill sees the un-mangled text — not the low-conf extraction it declined
+    to auto-file."""
+    raw = "a long verbatim capture that must survive into the review editor intact"
+    _set(fake_classify, "note", 0.3, note_text="x")  # far under 50% of raw → guarded
+    client.post("/scratch", json={"text": raw})
+    item = client.get("/review").json()["items"][0]
+    fields = json.loads(item["fields"])
+    assert fields["note_text"] == raw  # raw wins, not the mangled "x"
+
+
 # ── Route-once idempotency ────────────────────────────────────────────────────
 
 
@@ -441,11 +457,13 @@ def test_router_never_calls_delete_or_status(
         ("event", 0.95, {"title": "e"}),
         ("unknown", 0.05, {}),
     ]
-    for dest, conf, fields in scenarios:
+    # Neutral capture texts (no routing-header keyword) so each scenario's confidence
+    # governs its disposition — the goal-10 header forcing is exercised separately.
+    for i, (dest, conf, fields) in enumerate(scenarios):
         _set(fake_classify, dest, conf, **fields)
         run(
             router_svc.route_entry(
-                session, user_a, DummyCreds(), _entry(session, user_a, f"{dest} case")
+                session, user_a, DummyCreds(), _entry(session, user_a, f"capture {i}")
             )
         )
 
@@ -540,6 +558,132 @@ def test_router_never_reaches_rename_file():
     insert-only set)."""
     src = inspect.getsource(router_svc)
     assert "rename_file" not in src
+
+
+# ── Goal 10: the routing-header contract (LLM-interpreted, code-enforced) ──────
+
+
+def _ist_offset_iso(days: int) -> str:
+    import datetime
+    import zoneinfo
+
+    base = datetime.datetime.now(zoneinfo.ZoneInfo("Asia/Kolkata")).date()
+    return f"{(base + datetime.timedelta(days=days)).isoformat()}T00:00:00.000Z"
+
+
+def test_header_order_insensitive_task_date_backstop(
+    session, user_a, google, fake_classify
+):
+    """'tomorrow task pay the plumber' ≡ 'task tomorrow pay the plumber': both file a
+    task under tomorrow's bucket even when the classifier leaves due_date null — the
+    header date word backstops the null date (order-insensitive)."""
+    for text in ("tomorrow task pay the plumber", "task tomorrow pay the plumber"):
+        _set(fake_classify, "task", 0.95, title="pay the plumber", due_date=None)
+        state = run(
+            router_svc.route_entry(
+                session, user_a, DummyCreds(), _entry(session, user_a, text)
+            )
+        )
+        assert state == ROUTED_TASK
+    updates = [c for c in google.calls if c[0] == "update_due_date"]
+    assert len(updates) == 2
+    assert all(c[3] == _ist_offset_iso(1) for c in updates)  # both due tomorrow
+
+
+def test_keyword_task_header_forces_task_past_confidence_gate(
+    session, user_a, google, fake_classify
+):
+    """An explicit 'task' header files a task even at LOW confidence — a keyword is user
+    intent, not a probability, and must never bounce to review (the confidence gate is
+    bypassed for the destination)."""
+    _set(fake_classify, "task", 0.2, title="file the report")
+    state = run(
+        router_svc.route_entry(
+            session,
+            user_a,
+            DummyCreds(),
+            _entry(session, user_a, "task file the report"),
+        )
+    )
+    assert state == ROUTED_TASK
+    assert google.names().count("insert_task") == 1
+    assert session.exec(select(ReviewItem)).all() == []
+
+
+def test_note_header_forces_note_over_wrong_destination(
+    session, user_a, google, fake_classify, notes
+):
+    """A 'notes …' header over a task-looking body the LLM classified as a TASK still
+    files a note — degraded safe: body = raw minus the header, no summary/keywords,
+    default Doc. No task is ever created."""
+    _set(fake_classify, "task", 0.95, title="do the thing")  # LLM disagrees
+    entry = _entry(
+        session, user_a, "notes daily syncup - action items: do the thing and more"
+    )
+    state = run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
+    assert state == KEPT_NOTE
+    assert "insert_task" not in google.names()
+    _doc, _heading, body, summary, kw = notes["insert"][0]
+    assert body == "action items: do the thing and more"  # raw minus the header
+    assert summary is None and kw is None
+
+
+def test_note_header_low_conf_files_note_never_review(
+    session, user_a, google, fake_classify, notes
+):
+    """The observed bug: 'notes <leaf> - <MOM>' the LLM classified a note but UNDER
+    threshold. The header forces it past the gate — filed, never bounced. The LLM did
+    produce note fields, so its note_text + summary are used (not degraded)."""
+    _set(
+        fake_classify,
+        "note",
+        0.3,
+        note_text="the whole meeting summary kept verbatim here",
+        summary="sync",
+    )
+    entry = _entry(
+        session,
+        user_a,
+        "notes daily syncup - the whole meeting summary kept verbatim here",
+    )
+    state = run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
+    assert state == KEPT_NOTE
+    assert session.exec(select(ReviewItem)).all() == []
+    _doc, _heading, body, summary, _kw = notes["insert"][0]
+    assert body == "the whole meeting summary kept verbatim here"
+    assert summary == "sync"
+
+
+def test_header_date_backstop_does_not_override_llm_due(
+    session, user_a, google, fake_classify
+):
+    """The backstop fills a NULL classifier due; a non-null LLM due is left untouched."""
+    _set(fake_classify, "task", 0.95, title="x", due_date="2026-08-01")
+    run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, "tomorrow task x")
+        )
+    )
+    updates = [c for c in google.calls if c[0] == "update_due_date"]
+    assert (
+        updates[-1][3] == "2026-08-01T00:00:00.000Z"
+    )  # LLM due wins over the backstop
+
+
+def test_no_header_long_capture_uses_body_inference(
+    session, user_a, google, fake_classify
+):
+    """A capture with no header (a long leading segment, no keyword) routes purely by
+    the LLM's body inference + the confidence gate — goal-9 behaviour, unchanged."""
+    text = "please remember to eventually call the plumber about the leak downstairs"
+    _set(fake_classify, "task", 0.2, title="call plumber")  # low conf, no header force
+    state = run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, text)
+        )
+    )
+    assert state == IN_REVIEW  # gate applies (no keyword to force it through)
+    assert "insert_task" not in google.names()
 
 
 # ── Write-failure leaves the entry re-routable ────────────────────────────────
@@ -864,7 +1008,7 @@ def test_insert_note_puts_block_at_top_placeholder_h3(monkeypatch):
     monkeypatch.setattr(docs_mod, "_docs_service", lambda _creds: FakeDocs())
     run(
         docs_mod.insert_note(
-            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "- a\n- b"
+            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "a plain body line"
         )
     )
 
@@ -876,7 +1020,7 @@ def test_insert_note_puts_block_at_top_placeholder_h3(monkeypatch):
         f"{docs_mod._NO_SUMMARY_PLACEHOLDER}\n6-July-2026, 8:41 PM IST\n"
     )
     # verbatim body, then a trailing empty paragraph (the delimiter, goal 7a)
-    assert reqs[0]["insertText"]["text"].endswith("- a\n- b\n\n")
+    assert reqs[0]["insertText"]["text"].endswith("a plain body line\n\n")
     assert _para_styles(reqs)[:3] == ["HEADING_3", "HEADING_4", "NORMAL_TEXT"]
     assert reqs[1]["updateParagraphStyle"]["range"]["startIndex"] == 1
     # The last request styles the empty delimiter paragraph with a light-gray
@@ -929,7 +1073,7 @@ def test_insert_note_h3_h4_h5_full_shape(monkeypatch):
             DummyCreds(),
             "DOC",
             "6-July-2026, 8:41 PM IST",
-            "- a\n- b",
+            "a plain body",
             "milk + eggs",
             ["milk", "eggs"],
         )
@@ -938,11 +1082,11 @@ def test_insert_note_h3_h4_h5_full_shape(monkeypatch):
     text = reqs[0]["insertText"]["text"]
     # one-liner headline, timestamp, keyword line, verbatim body, then delimiter.
     assert text.startswith("milk + eggs\n6-July-2026, 8:41 PM IST\nmilk, eggs\n")
-    assert text.endswith("- a\n- b\n\n")
+    assert text.endswith("a plain body\n\n")
     # Named styles: H3 (one-liner) → H4 (timestamp) → H5 → body → delimiter (NORMAL).
     styles = _para_styles(reqs)
     assert styles[:4] == ["HEADING_3", "HEADING_4", "HEADING_5", "NORMAL_TEXT"]
-    # No bold text-style requests in the goal-9 shape.
+    # No bold text-style requests for a plain body (goal-9 shape unchanged).
     assert not any("updateTextStyle" in r for r in reqs)
     assert "borderBottom" in reqs[-1]["updateParagraphStyle"]["paragraphStyle"]
 
@@ -954,12 +1098,13 @@ def test_insert_note_summary_no_keywords_skips_h5(monkeypatch):
     captured = _capture_batchupdate(monkeypatch)
     run(
         docs_mod.insert_note(
-            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "- a", "one liner", []
+            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "a line", "one liner", []
         )
     )
     reqs = captured["requests"]
     assert (
-        reqs[0]["insertText"]["text"] == "one liner\n6-July-2026, 8:41 PM IST\n- a\n\n"
+        reqs[0]["insertText"]["text"]
+        == "one liner\n6-July-2026, 8:41 PM IST\na line\n\n"
     )
     assert _para_styles(reqs)[:3] == ["HEADING_3", "HEADING_4", "NORMAL_TEXT"]
 
@@ -973,15 +1118,141 @@ def test_insert_note_blank_summary_uses_placeholder_h3_stable_timestamp(monkeypa
     captured = _capture_batchupdate(monkeypatch)
     run(
         docs_mod.insert_note(
-            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "- a", "   "
+            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "a line", "   "
         )
     )
     reqs = captured["requests"]
     assert reqs[0]["insertText"]["text"] == (
-        f"{docs_mod._NO_SUMMARY_PLACEHOLDER}\n6-July-2026, 8:41 PM IST\n- a\n\n"
+        f"{docs_mod._NO_SUMMARY_PLACEHOLDER}\n6-July-2026, 8:41 PM IST\na line\n\n"
     )
     assert _para_styles(reqs)[:3] == ["HEADING_3", "HEADING_4", "NORMAL_TEXT"]
     assert not any("updateTextStyle" in r for r in reqs)
+
+
+# ── Goal 10: the structured-body markdown renderer ────────────────────────────
+
+
+def _bullet_reqs(reqs):
+    return [r for r in reqs if "createParagraphBullets" in r]
+
+
+def _text_style_reqs(reqs):
+    return [r for r in reqs if "updateTextStyle" in r]
+
+
+def test_insert_note_body_markdown_headings_never_heading_style(monkeypatch):
+    """THE goal-10 invariant: a markdown heading in the body renders as a **bold
+    NORMAL_TEXT** line — never a `HEADING_*` paragraph — so the H3/H4/H5 chrome stays
+    the ONLY heading structure. The heading words survive verbatim minus the marker."""
+    captured = _capture_batchupdate(monkeypatch)
+    run(
+        docs_mod.insert_note(
+            DummyCreds(),
+            "DOC",
+            "6-July-2026, 8:41 PM IST",
+            "## Agenda\n### Action items\nregular line",
+            "mom",
+        )
+    )
+    reqs = captured["requests"]
+    text = reqs[0]["insertText"]["text"]
+    # Marker stripped, words kept verbatim; the '#'s are gone.
+    assert "Agenda\nAction items\nregular line\n" in text
+    assert "#" not in text
+    # The ONLY HEADING_* styles are the three chrome lines (H3 one-liner, H4 timestamp).
+    styles = _para_styles(reqs)
+    assert [s for s in styles if s.startswith("HEADING_")] == ["HEADING_3", "HEADING_4"]
+    # The heading lines are bold NORMAL_TEXT (bold text-style requests exist for them).
+    assert _text_style_reqs(reqs)
+
+
+def test_insert_note_body_bullets_become_nested_bullets(monkeypatch):
+    """`- `/`  - ` lines become real Docs bullets (`createParagraphBullets`) with the
+    nesting carried by leading tabs; no HEADING_* comes from the body."""
+    captured = _capture_batchupdate(monkeypatch)
+    run(
+        docs_mod.insert_note(
+            DummyCreds(),
+            "DOC",
+            "6-July-2026, 8:41 PM IST",
+            "- top\n  - nested\n- back",
+        )
+    )
+    reqs = captured["requests"]
+    text = reqs[0]["insertText"]["text"]
+    # The nested bullet carries one leading tab (its level); markers stripped.
+    assert "top\n\tnested\nback\n" in text
+    bullets = _bullet_reqs(reqs)
+    assert len(bullets) == 1  # one contiguous unordered run
+    assert bullets[0]["createParagraphBullets"]["bulletPreset"] == (
+        "BULLET_DISC_CIRCLE_SQUARE"
+    )
+    # Body contributes no heading style.
+    assert [s for s in _para_styles(reqs) if s.startswith("HEADING_")] == [
+        "HEADING_3",
+        "HEADING_4",
+    ]
+
+
+def test_insert_note_numbered_list_uses_ordered_preset(monkeypatch):
+    """`1. ` lines become an ORDERED bullet run (a different preset from unordered)."""
+    captured = _capture_batchupdate(monkeypatch)
+    run(
+        docs_mod.insert_note(
+            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "1. first\n2. second"
+        )
+    )
+    bullets = _bullet_reqs(captured["requests"])
+    assert len(bullets) == 1
+    assert bullets[0]["createParagraphBullets"]["bulletPreset"] == (
+        "NUMBERED_DECIMAL_ALPHA_ROMAN"
+    )
+
+
+def test_insert_note_inline_bold_becomes_bold_run(monkeypatch):
+    """Inline `**bold**` → a bold text run, the `**` markers consumed from the text."""
+    captured = _capture_batchupdate(monkeypatch)
+    run(
+        docs_mod.insert_note(
+            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "some **strong** word"
+        )
+    )
+    reqs = captured["requests"]
+    assert "some strong word\n" in reqs[0]["insertText"]["text"]
+    assert "**" not in reqs[0]["insertText"]["text"]
+    bolds = _text_style_reqs(reqs)
+    assert len(bolds) == 1
+    rng = bolds[0]["updateTextStyle"]["range"]
+    # The bold run spans exactly "strong" within the inserted text.
+    body = reqs[0]["insertText"]["text"]
+    assert body[rng["startIndex"] - 1 : rng["endIndex"] - 1] == "strong"
+
+
+def test_insert_note_plain_body_byte_identical_to_pre_goal10(monkeypatch):
+    """A plain one-liner note produces the exact pre-goal-10 request shape: one
+    insertText, three chrome/body paragraph styles, one delimiter — no bullets, no
+    bold, no extra requests."""
+    captured = _capture_batchupdate(monkeypatch)
+    run(
+        docs_mod.insert_note(
+            DummyCreds(), "DOC", "6-July-2026, 8:41 PM IST", "just a plain note"
+        )
+    )
+    reqs = captured["requests"]
+    # insertText + H3 + H4 + body NORMAL_TEXT + delimiter = exactly 5 requests.
+    assert len(reqs) == 5
+    assert "insertText" in reqs[0]
+    assert _para_styles(reqs) == [
+        "HEADING_3",
+        "HEADING_4",
+        "NORMAL_TEXT",
+        "NORMAL_TEXT",
+    ]
+    assert not _bullet_reqs(reqs) and not _text_style_reqs(reqs)
+    assert reqs[0]["insertText"]["text"] == (
+        f"{docs_mod._NO_SUMMARY_PLACEHOLDER}\n6-July-2026, 8:41 PM IST\n"
+        "just a plain note\n\n"
+    )
 
 
 def test_auto_route_note_passes_summary_through(
@@ -1066,3 +1337,210 @@ def test_review_note_endpoint_overrides(client, google, fake_classify, notes):
     assert r.status_code == 200 and r.json()["entry_state"] == KEPT_NOTE
     assert notes["insert"][0][2] == "edited note"
     assert notes["insert"][0][3] == "one-liner"
+
+
+# ── Goal 10a: the long-capture classifier blowout ─────────────────────────────
+#
+# Observed: every capture over ~8k chars came back `unknown`/0.0 while every short
+# one classified fine. Cause: `note_text` is a VERBATIM echo, so the response scales
+# with the input — a 10k-char meeting-notes paste needs ~2.5k output tokens and
+# truncates mid-JSON, collapsing the whole classification. The user saw it as three
+# separate bugs (wrong Doc, no one-liner, no keywords); all three are this.
+
+
+def test_long_capture_is_excerpted_for_classification():
+    """Long captures are shown to the model head-only. Measured: given the whole thing
+    the model burns its output budget retyping the body and returns summary/doc_path/
+    keywords as null — bounding the input is what buys those fields back."""
+    from app.router import config
+    from app.router.classifier import _excerpt
+
+    short = "note t4d test\n\n- a short capture"
+    long_text = "note t4d test\n\n" + ("- a line of meeting notes\n" * 200)
+
+    assert _excerpt(short) == (short, False)  # goal-9 path untouched
+    shown, truncated = _excerpt(long_text)
+    assert truncated
+    assert len(shown) < len(long_text)
+    assert shown.startswith("note t4d test")  # the routing header always survives
+    assert len(shown) <= config.CLASSIFY_MAX_CHARS + 100  # + the truncation marker
+
+
+def test_echo_of_a_truncated_capture_is_discarded(monkeypatch):
+    """The model echoes even when told not to (measured), and an echo of an excerpt is
+    a body missing its tail. Code — not the prompt — is what refuses it."""
+    from app.router import classifier
+
+    long_text = "note t4d test\n\n" + ("- a line of meeting notes\n" * 200)
+    seen = {}
+
+    class _Resp:
+        def __init__(self, parsed):
+            self.parsed_output = parsed
+
+    async def _parse(**kw):
+        seen["system"] = kw["system"]
+        seen["user"] = kw["messages"][0]["content"]
+        # A disobedient model: echoes an ABRIDGED body anyway.
+        return _Resp(
+            RouterClassification(
+                destination="note",
+                confidence=0.95,
+                fields=RouterFields(note_text="- a line of meeting notes\n" * 20),
+            )
+        )
+
+    class _Client:
+        messages = type("M", (), {"parse": staticmethod(_parse)})()
+
+    monkeypatch.setattr(classifier.anthropic, "AsyncAnthropic", lambda: _Client())
+
+    result = run(classifier.classify(long_text))
+    assert result.fields.note_text is None, "an abridged echo must never reach the Doc"
+    assert result.destination == "note" and result.confidence == 0.95
+    assert "TRUNCATED CAPTURE" in seen["system"]
+    assert len(seen["user"]) < len(long_text)
+
+
+def test_long_note_body_is_verbatim_minus_header_when_llm_omits_echo(
+    session, user_a, google, fake_classify, notes
+):
+    """The long path end-to-end: the LLM returns note_text=None (as instructed) and
+    code supplies the body — the user's words verbatim, minus only the routing header,
+    with the one-liner + keywords the truncated response used to lose."""
+    body = "\n".join(f"- meeting point {i}" for i in range(400))
+    raw = f"note t4d test\n\n{body}"
+    _set(
+        fake_classify,
+        "note",
+        0.95,
+        note_text=None,  # suppressed by _echo_section
+        summary="T4D sync",
+        keywords=["t4d", "sync"],
+    )
+    entry = _entry(session, user_a, raw)
+    run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
+
+    written_body, summary, keywords = notes["insert"][0][2:5]
+    assert written_body == body  # verbatim, header stripped, nothing lost
+    assert "note t4d test" not in written_body
+    assert summary == "T4D sync"  # the H3 one-liner survives
+    assert keywords == ["t4d", "sync"]  # the H5 keywords survive
+
+
+def test_long_note_falls_back_to_raw_when_there_is_no_header(
+    session, user_a, google, fake_classify, notes
+):
+    """No header to strip → the fallback is the whole raw capture, verbatim. The
+    guard must never drop words just because the echo was suppressed."""
+    raw = "\n".join(f"line {i}" for i in range(400))
+    _set(fake_classify, "note", 0.95, note_text=None)
+    entry = _entry(session, user_a, raw)
+    run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
+    assert notes["insert"][0][2] == raw
+
+
+# ── Goal 10a: route-once is atomic (the double-append) ────────────────────────
+
+
+def test_concurrent_routers_append_a_note_exactly_once(
+    session, engine, user_a, google, fake_classify, notes
+):
+    """Observed: one capture, two identical Doc entries. Route-once was a
+    check-then-act and inline routing holds the entry UNROUTED for ~25s (classifier +
+    Docs append), so the scheduler backstop / a "Route now" click / a retried POST
+    could read the same row and file it again. Two routers, one entry, ONE append."""
+    from sqlmodel import Session as SQLSession
+
+    _set(fake_classify, "note", 0.95, note_text="the meeting notes")
+    entry = _entry(session, user_a, "note t4d test\n\nthe meeting notes")
+    entry_id = entry.id
+
+    async def router():
+        # Its own session — the inline-POST vs backstop collision is cross-session.
+        with SQLSession(engine) as s:
+            e = s.get(ScratchEntry, entry_id)
+            return await router_svc.route_entry(s, user_a, DummyCreds(), e)
+
+    async def both():
+        return await asyncio.gather(router(), router())
+
+    states = run(both())
+    assert len(notes["insert"]) == 1, "the note was appended to the Doc twice"
+    assert KEPT_NOTE in states  # exactly one winner; the loser saw the claim
+
+
+def test_failed_route_releases_the_claim_so_the_backstop_can_retry(
+    session, user_a, google, fake_classify, notes, monkeypatch
+):
+    """A claim must never become a grave: a Docs failure hands the entry back to
+    UNROUTED so the backstop still retries it (the goal-5 re-routable contract)."""
+
+    async def _boom(*a, **k):
+        raise ApiError(502, "docs_down", "boom")
+
+    monkeypatch.setattr("app.google.docs.insert_note", _boom)
+    _set(fake_classify, "note", 0.95, note_text="x")
+    entry = _entry(session, user_a, "notes - x")
+
+    with pytest.raises(ApiError):
+        run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
+    session.refresh(entry)
+    assert entry.routing_state == UNROUTED
+
+
+def test_backstop_reclaims_a_dead_claim(session, user_a, google, fake_classify, notes):
+    """A router that died mid-route leaves a stale ROUTING row. The backstop exists
+    for exactly that crash-recovery case, so it must reclaim it rather than skip it
+    forever."""
+    from datetime import timedelta
+
+    _set(fake_classify, "note", 0.95, note_text="x")
+    entry = _entry(session, user_a, "notes - x")
+    entry.routing_state = ROUTING
+    entry.routed_at = router_svc._now() - timedelta(
+        seconds=router_svc._STALE_CLAIM_SECONDS + 60
+    )
+    session.add(entry)
+    session.commit()
+
+    run(router_svc.route_unrouted(session, user_a, DummyCreds()))
+    session.refresh(entry)
+    assert entry.routing_state == KEPT_NOTE
+
+
+def test_backstop_leaves_a_live_claim_alone(
+    session, user_a, google, fake_classify, notes
+):
+    """The flip side: a fresh claim is someone else's in-flight route. Stealing it is
+    the double-append bug, so the backstop must not touch it."""
+    _set(fake_classify, "note", 0.95, note_text="x")
+    entry = _entry(session, user_a, "notes - x")
+    entry.routing_state = ROUTING
+    entry.routed_at = router_svc._now()
+    session.add(entry)
+    session.commit()
+
+    run(router_svc.route_unrouted(session, user_a, DummyCreds()))
+    session.refresh(entry)
+    assert entry.routing_state == ROUTING
+    assert notes["insert"] == []
+
+
+def test_content_first_line_is_never_mistaken_for_a_header(
+    session, user_a, google, fake_classify, notes
+):
+    """The body fallback may only strip a leading segment that is PROVABLY routing
+    words (a task/note keyword or a date word). A short first line of real content is
+    not a header — stripping it would silently eat the user's first line, which is the
+    one thing the verbatim guard exists to prevent."""
+    raw = "the offsite venue\nwas the lakeside resort\nand everyone liked it"
+    _set(fake_classify, "note", 0.95, note_text=None)
+    entry = _entry(session, user_a, raw)
+    run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
+    assert notes["insert"][0][2] == raw  # nothing stripped, nothing lost
+
+    hdr = router_svc._parse_header(raw)
+    assert not hdr.determinate
+    assert router_svc._parse_header("note t4d test\n\nbody").determinate
+    assert router_svc._parse_header("task tomorrow - pay the plumber").determinate
